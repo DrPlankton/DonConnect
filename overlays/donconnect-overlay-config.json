@@ -1,0 +1,27 @@
+{
+  "mode": "both",
+  "title": "DonConnect",
+  "refreshMs": 1000,
+  "showLastDonation": true,
+  "showServices": true,
+  "bare": false,
+  "goalFormat": "amount",
+  "servicesTitle": "Подключено",
+  "style": {
+    "font": "Segoe UI, Arial, sans-serif",
+    "bg": "rgba(10, 12, 18, 0.72)",
+    "text": "#ffffff",
+    "muted": "#b8c0cc",
+    "accent": "#35d07f",
+    "barBg": "rgba(255,255,255,0.18)",
+    "radius": "8px",
+    "scale": "1",
+    "width": "920px",
+    "padding": "22px",
+    "titleSize": "26px",
+    "valueSize": "38px",
+    "labelSize": "15px",
+    "metaSize": "16px",
+    "shadow": "0 16px 44px rgba(0,0,0,0.28)"
+  }
+}

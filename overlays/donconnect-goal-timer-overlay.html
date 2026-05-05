@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DonConnect Goal / Timer</title>
+  <style>
+    :root {
+      --bg: rgba(10, 12, 18, 0.72);
+      --text: #ffffff;
+      --muted: #b8c0cc;
+      --accent: #35d07f;
+      --bar-bg: rgba(255, 255, 255, 0.18);
+      --radius: 8px;
+      --font: "Segoe UI", Arial, sans-serif;
+      --scale: 1;
+      --panel-width: 920px;
+      --panel-padding: 22px;
+      --title-size: 26px;
+      --value-size: 38px;
+      --label-size: 15px;
+      --meta-size: 16px;
+      --shadow: 0 16px 44px rgba(0, 0, 0, 0.28);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: transparent;
+      color: var(--text);
+      font-family: var(--font);
+      overflow: hidden;
+    }
+
+    .wrap {
+      width: 100vw;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: calc(18px * var(--scale));
+    }
+
+    .panel {
+      width: min(var(--panel-width), 100%);
+      background: var(--bg);
+      border-radius: var(--radius);
+      padding: var(--panel-padding);
+      box-shadow: var(--shadow);
+    }
+
+    .title {
+      margin: 0 0 calc(14px * var(--scale));
+      font-size: var(--title-size);
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .grid {
+      display: grid;
+      gap: calc(16px * var(--scale));
+    }
+
+    .both { grid-template-columns: 1fr 1fr; }
+    .single { grid-template-columns: 1fr; }
+    .block { min-width: 0; }
+
+    .label {
+      color: var(--muted);
+      font-size: var(--label-size);
+      font-weight: 700;
+      margin-bottom: calc(6px * var(--scale));
+    }
+
+    .value {
+      font-size: var(--value-size);
+      font-weight: 900;
+      line-height: 1.05;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: var(--meta-size);
+      margin-top: calc(8px * var(--scale));
+      min-height: calc(20px * var(--scale));
+    }
+
+    .bar {
+      width: 100%;
+      height: calc(16px * var(--scale));
+      border-radius: 999px;
+      background: var(--bar-bg);
+      overflow: hidden;
+      margin-top: calc(12px * var(--scale));
+    }
+
+    .fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      border-radius: inherit;
+      transition: width 450ms ease;
+    }
+
+    .last,
+    .services {
+      margin-top: calc(14px * var(--scale));
+      color: var(--muted);
+      font-size: calc(var(--meta-size) * 0.9);
+    }
+
+    .services-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: calc(7px * var(--scale));
+      margin-top: calc(7px * var(--scale));
+    }
+
+    .service {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 999px;
+      padding: calc(4px * var(--scale)) calc(9px * var(--scale));
+      font-size: calc(var(--meta-size) * 0.82);
+      font-weight: 700;
+    }
+
+    .hidden { display: none; }
+
+    body.bare .wrap {
+      padding: 0;
+    }
+
+    body.bare .panel {
+      width: auto;
+      background: transparent;
+      border-radius: 0;
+      padding: 0;
+      box-shadow: none;
+    }
+
+    body.bare .title,
+    body.bare .label,
+    body.bare .meta,
+    body.bare .bar,
+    body.bare .last,
+    body.bare .services {
+      display: none;
+    }
+
+    body.bare .grid {
+      display: flex;
+      gap: calc(28px * var(--scale));
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="panel">
+      <h1 class="title" id="overlayTitle">DonConnect</h1>
+      <div class="grid both" id="grid">
+        <article class="block" id="goalBlock">
+          <div class="label" id="goalTitle">Сбор</div>
+          <div class="value" id="goalValue">0</div>
+          <div class="bar"><div class="fill" id="goalFill"></div></div>
+          <div class="meta" id="goalMeta">0%</div>
+        </article>
+        <article class="block" id="timerBlock">
+          <div class="label" id="timerTitle">Марафон</div>
+          <div class="value" id="timerValue">00:00:00</div>
+          <div class="meta" id="timerMeta">+00:00:00</div>
+        </article>
+      </div>
+      <div class="services" id="services"></div>
+      <div class="last" id="lastDonation"></div>
+    </section>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const configUrl = params.get("config") || "donconnect-overlay-config.json";
+    const stateUrl = params.get("state") || "donconnect-overlay-state.json";
+    let config = {};
+
+    init();
+
+    async function init() {
+      config = await loadJson(configUrl, {});
+      applyConfig(config);
+      await refresh();
+      setInterval(refresh, Number(config.refreshMs || params.get("refreshMs") || 1000));
+    }
+
+    async function refresh() {
+      const state = await loadJson(stateUrl, {});
+      render(state || {});
+    }
+
+    async function loadJson(url, fallback) {
+      try {
+        const response = await fetch(`${url}?_=${Date.now()}`, { cache: "no-store" });
+        return response.ok ? await response.json() : fallback;
+      } catch {
+        return fallback;
+      }
+    }
+
+    function applyConfig(cfg) {
+      const style = cfg.style || {};
+      setVar("--bg", params.get("bg") || style.bg);
+      setVar("--text", params.get("text") || style.text);
+      setVar("--muted", params.get("muted") || style.muted);
+      setVar("--accent", params.get("accent") || style.accent);
+      setVar("--bar-bg", params.get("barBg") || style.barBg);
+      setVar("--radius", params.get("radius") || style.radius);
+      setVar("--font", params.get("font") || style.font);
+      setVar("--scale", params.get("scale") || style.scale);
+      setVar("--panel-width", params.get("width") || style.width);
+      setVar("--panel-padding", params.get("padding") || style.padding);
+      setVar("--title-size", params.get("titleSize") || style.titleSize);
+      setVar("--value-size", params.get("valueSize") || style.valueSize);
+      setVar("--label-size", params.get("labelSize") || style.labelSize);
+      setVar("--meta-size", params.get("metaSize") || style.metaSize);
+      setVar("--shadow", params.get("shadow") || style.shadow);
+      document.body.classList.toggle("bare", boolParam("bare", cfg.bare === true));
+      document.getElementById("overlayTitle").textContent = params.get("title") || cfg.title || "DonConnect";
+    }
+
+    function render(state) {
+      const mode = (params.get("mode") || config.mode || defaultMode()).toLowerCase();
+      const bare = document.body.classList.contains("bare");
+      const goal = state.goal || {};
+      const timer = state.timer || {};
+      const last = state.lastDonation || {};
+      const showGoal = mode === "both" || mode === "goal";
+      const showTimer = mode === "both" || mode === "timer";
+
+      document.getElementById("goalBlock").classList.toggle("hidden", !showGoal);
+      document.getElementById("timerBlock").classList.toggle("hidden", !showTimer);
+      document.getElementById("grid").className = `grid ${showGoal && showTimer ? "both" : "single"}`;
+
+      document.getElementById("goalTitle").textContent = goal.title || "Сбор";
+      document.getElementById("goalValue").textContent = goalDisplay(goal, bare);
+      const percent = clamp(Number(goal.percent || 0), 0, 100);
+      document.getElementById("goalFill").style.width = `${percent}%`;
+      document.getElementById("goalMeta").textContent = goal.targetText ? `${goal.percentText || "0%"} | ${goal.targetText}` : (goal.percentText || "");
+
+      document.getElementById("timerTitle").textContent = timer.title || "Марафон";
+      document.getElementById("timerValue").textContent = currentTimerText(timer);
+      document.getElementById("timerMeta").textContent = timer.addedSeconds && Number(timer.addedSeconds) > 0 ? `+${timer.addedText || "00:00:00"}` : "";
+
+      const showLast = boolParam("showLastDonation", config.showLastDonation !== false);
+      document.getElementById("lastDonation").textContent = showLast && last.user
+        ? `${last.user} | ${[last.amount, last.currency].filter(Boolean).join(" ")} | ${last.platform || ""}`
+        : "";
+
+      renderServices(state.services || []);
+    }
+
+    function defaultMode() {
+      const path = location.pathname.toLowerCase();
+      if (path.includes("goal-overlay")) return "goal";
+      if (path.includes("timer-overlay")) return "timer";
+      return "both";
+    }
+
+    function goalDisplay(goal, bare) {
+      const format = (params.get("goalFormat") || config.goalFormat || (bare ? "summary" : "amount")).toLowerCase();
+      if (format === "percent") return goal.percentText || "0%";
+      if (format === "summary") return goalAmountSummary(goal);
+      return goal.currentText || goal.summary || goalAmountSummary(goal);
+    }
+
+    function goalAmountSummary(goal) {
+      const current = nonEmpty(goal.current, "0");
+      const target = nonEmpty(goal.target, "0");
+      const currency = nonEmpty(goal.currency, "");
+      return `${current}/${target}${currency ? " " + currency : ""}`;
+    }
+
+    function renderServices(services) {
+      const box = document.getElementById("services");
+      const show = boolParam("showServices", config.showServices === true);
+      box.classList.toggle("hidden", !show || !services.length);
+      if (!show || !services.length) {
+        box.innerHTML = "";
+        return;
+      }
+
+      const title = params.get("servicesTitle") || config.servicesTitle || "Подключено";
+      box.innerHTML = `<div>${escapeHtml(title)}</div><div class="services-list">${
+        services.map(name => `<span class="service">${escapeHtml(String(name))}</span>`).join("")
+      }</div>`;
+    }
+
+    function currentTimerText(timer) {
+      const endsAt = Date.parse(timer.endsAt || "");
+      if (!Number.isFinite(endsAt)) return timer.text || "00:00:00";
+      return formatDuration(Math.max(0, (endsAt - Date.now()) / 1000));
+    }
+
+    function formatDuration(totalSeconds) {
+      const seconds = Math.floor(Math.max(0, totalSeconds));
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      return `${pad(h)}:${pad(m)}:${pad(s)}`;
+    }
+
+    function pad(value) {
+      return String(value).padStart(2, "0");
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
+    }
+
+    function setVar(name, value) {
+      if (value !== undefined && value !== null && value !== "") {
+        document.documentElement.style.setProperty(name, value);
+      }
+    }
+
+    function boolParam(name, fallback) {
+      const value = params.get(name);
+      if (value === null || value === "") return fallback;
+      return /^(1|true|yes|on)$/i.test(value);
+    }
+
+    function nonEmpty(value, fallback) {
+      return value === undefined || value === null || value === "" ? fallback : String(value);
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, ch => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[ch]));
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Streamer.bot / local test exports
+*.bak
+*.tmp
+*.log
+
+# Local secret notes or private builds
+*.secret.*
+*.private.*
+private/
+secrets/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build artifacts, if the project is later wrapped in a .NET project
+bin/
+obj/

@@ -1,0 +1,37 @@
+{
+  "title": "Спасибо за стрим",
+  "subtitle": "Сегодня с нами были",
+  "outro": "Увидимся на следующем стриме",
+  "duration": "90s",
+  "donationFields": "name,amount",
+  "style": {
+    "bg": "transparent",
+    "text": "#f7f4ec",
+    "muted": "#b9d8d2",
+    "accent": "#ffcf5a",
+    "font": "Segoe UI, Arial, sans-serif"
+  },
+  "sectionLabels": {
+    "Follows": "Новые фолловеры",
+    "Cheers": "Bits / Cheers",
+    "Subs": "Подписки",
+    "ReSubs": "Продления подписки",
+    "GiftSubs": "Подарочные подписки",
+    "GiftBombs": "Массовые гифты",
+    "Raided": "Рейды",
+    "Moderator": "Модераторы",
+    "VIPs": "VIP",
+    "Users": "Зрители",
+    "allBits": "Топ Bits за все время",
+    "monthBits": "Топ Bits за месяц",
+    "weekBits": "Топ Bits за неделю",
+    "донаты": "Донаты"
+  },
+  "hideSections": [
+    "Users",
+    "allBits",
+    "monthBits",
+    "weekBits"
+  ],
+  "showSections": []
+}
