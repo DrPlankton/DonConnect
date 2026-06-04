@@ -1,5 +1,17 @@
 # DonConnect Beta 2
 
+## Описание на русском
+
+DonConnect - расширение для Streamer.bot, которое принимает донаты с разных площадок и приводит их к одному формату для Streamer.bot, OBS-виджетов, цели, таймера, титров и лидерборда.
+
+Beta 2 добавляет встроенный браузерный редактор виджетов, OBS-док с последними донатами, донат-алерты, цель, таймер, титры, лидерборд, медиатеку, фильтр запретных слов и проверку новых версий. Пользователю не нужно устанавливать Node.js, npm, Python, Docker, Electron или отдельный сервер: редактор запускается самим расширением локально на `127.0.0.1`.
+
+- Русская инструкция: [README_RU.md](README_RU.md)
+- Патчноут Beta 2: [PATCH_NOTES_RU.md](PATCH_NOTES_RU.md)
+- Файл для установки: [DonConnect.Beta2.sb](DonConnect.Beta2.sb)
+
+---
+
 DonConnect is a Streamer.bot extension for receiving donations from several services and exposing them in one shared format for Streamer.bot actions, OBS widgets, goals, timers, credits, and leaderboards.
 
 ## Quick Start: Tokens And API Access

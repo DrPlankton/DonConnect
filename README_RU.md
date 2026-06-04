@@ -2,6 +2,8 @@
 
 DonConnect - расширение для Streamer.bot, которое принимает донаты с разных площадок и приводит их к одному формату для Streamer.bot, OBS-виджетов, цели, таймера, титров и лидерборда.
 
+Патчноут Beta 2: [PATCH_NOTES_RU.md](PATCH_NOTES_RU.md)
+
 ## Быстрый старт: где взять токены и API
 
 ### DonationAlerts
