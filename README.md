@@ -1,308 +1,167 @@
-# DonConnect for Streamer.bot
+# DonConnect Beta 2
 
-DonConnect is a donation/tip bridge for Streamer.bot. It listens for donation events from supported platforms and exposes them through Streamer.bot Custom Code Event triggers with one normalized variable format.
+DonConnect is a Streamer.bot extension for receiving donations from several services and exposing them in one shared format for Streamer.bot actions, OBS widgets, goals, timers, credits, and leaderboards.
 
-## Current Status
+## Quick Start: Tokens And API Access
 
-Beta version: `0.8.1-beta`.
+### DonationAlerts
 
-Working / beta-ready:
+For Beta 2 testers, DonationAlerts is the easiest provider to connect.
 
-- Test donation event.
-- DonationAlerts via OAuth and WebSocket.
-- StreamElements via Astro WebSocket Gateway and `channel.tips`.
-- DonatePay RU and DonatePay EU via `/api/v1/transactions` polling.
-- Streamlabs via `/api/v2.0/donations` polling.
-- DonateX via `/v1/donations` polling.
-- deStream via `/api/v2/users/tips` polling.
-- Donate.Stream via configurable polling endpoint.
-- Unified Streamer.bot variables.
-- Custom triggers per provider.
-- Automatic restart after Streamer.bot restart when tokens are already saved.
-- Deduplication for repeated donation events.
-- Generic polling API provider.
-- Native Streamer.bot Credits donation integration.
-- Donation goal and donation marathon/timer variables.
-- Optional OBS overlays for goal and timer.
+1. Import `DonConnect.Beta2.sb` into Streamer.bot.
+2. Run the action `DonConnect - DonationAlerts Shared Auth`.
+3. A DonationAlerts login page will open in your browser.
+4. Log in to your own DonationAlerts account and allow access.
+5. Return to Streamer.bot and run `DonConnect - Widget Editor`.
 
-Experimental / provider-dependent:
+You do not need to create your own DonationAlerts API application for this beta. The shared test application credentials are bundled so testers can connect faster.
 
-- Donate.Stream / DonateStream uses a configurable endpoint because its public cabinet API is not documented as a stable external API.
+Useful links:
 
-This is a beta build. Test with your own Streamer.bot profile before using it on a live production stream.
+- DonationAlerts dashboard: https://www.donationalerts.com/dashboard
+- DonationAlerts API documentation: https://www.donationalerts.com/apidoc
 
-## Files
+### Other Providers
 
-- `DonConnect.cs` - main Streamer.bot C# code.
-- `DonConnect.install.sb` - ready-to-import Streamer.bot import file.
-- `README_RU.md` - full Russian guide.
-- `README.md` - English overview.
+Open the provider setup action in Streamer.bot and paste the token/API key from the matching service dashboard.
 
-## Installation
+- StreamElements: account/channel settings and JWT token, https://streamelements.com/dashboard/account/channels
+- StreamElements help: https://support.streamelements.com/hc/en-us/categories/10474362906642-Getting-Started
+- DonatePay RU: https://donatepay.ru/
+- DonatePay EU: https://donatepay.eu/
+- DonatePay/DonationPay API docs: https://api.donationpay.org/documentation/
+- DonateX.gg: https://donatex.gg/
+- ODA docs: https://opendonationassistant.mintlify.app/auth
+- Donate.Stream: https://donate.stream/
 
-1. Open Streamer.bot.
-2. Click **Import**.
-3. Open `DonConnect.install.sb` in a text editor.
-4. Copy the entire file content.
-5. Paste it into Streamer.bot **Import String**.
-6. Click **Import**.
+Do not paste tokens into stream chat, Discord screenshots, public GitHub issues, or OBS text sources.
 
-After import, you should see an Actions group named `DonConnect`.
-Custom donation triggers are registered automatically the first time any DonConnect action runs, including setup, status, test donation, start, and auto start.
+## Install
 
-## Beginner Setup
-
-The recommended setup flow does not require chat commands.
-
-1. Select `DonConnect - Setup DonationAlerts`.
-2. Right-click the action or its trigger.
-3. Choose **Test Trigger**.
-4. Authorize in the browser.
-5. DonConnect registers its triggers and starts listening automatically.
-
-After Streamer.bot restarts, `DonConnect - Auto Start` attempts to start listening again if tokens were already saved. It does not open a browser.
-
-## DonationAlerts
-
-DonationAlerts redirect URI:
+Use one file:
 
 ```text
-http://127.0.0.1:8597/donconnect/donationalerts/callback/
+DonConnect.Beta2.sb
 ```
 
-Scopes:
+In Streamer.bot:
+
+1. Open **Import**.
+2. Open `DonConnect.Beta2.sb` as a text file or copy its full content.
+3. Paste it into **Import String**.
+4. Press **Import**.
+
+After import, the DonConnect actions will appear in Streamer.bot.
+
+## Open The Widget Editor
+
+Run one action:
 
 ```text
-oauth-user-show oauth-donation-subscribe oauth-donation-index
+DonConnect - Widget Editor
 ```
 
-DonConnect supports two DonationAlerts modes:
-
-- Simple / shared app mode, intended for public builds.
-- Advanced own app mode, where a user enters their own OAuth app credentials.
-
-Do not commit real `Client Secret` values to GitHub. Keep placeholders in public releases.
-
-## StreamElements
-
-Use these values from the StreamElements dashboard:
-
-- `Account ID`
-- `JWT Token`
-
-Do not use the Overlay Token for DonConnect.
-
-The JWT token is secret. Do not publish it.
-
-## Streamlabs
-
-Use a Streamlabs API access token with donations read access.
+This action starts the built-in local server and opens the browser editor:
 
 ```text
-DonConnect - Setup Streamlabs
-streamlabsToken = your Streamlabs access token
+http://127.0.0.1:3987/donconnect/editor
 ```
 
-## DonateX
+No extra software is required. Users do not need Node.js, npm, Python, Docker, Electron, or a separate server.
 
-Use a DonateX access token with `donations.read`.
+## OBS URLs
+
+Use the editor button to copy the current widget URL, or paste one of these URLs manually.
 
 ```text
-DonConnect - Setup DonateX
-donateXAccessToken = your DonateX access token
+Donation alert:  http://127.0.0.1:3987/donconnect/widget
+Goal:            http://127.0.0.1:3987/donconnect/goal
+Timer:           http://127.0.0.1:3987/donconnect/timer
+Credits:         http://127.0.0.1:3987/donconnect/credits
+Leaderboard:     http://127.0.0.1:3987/donconnect/leaderboard
+OBS dock panel:  http://127.0.0.1:3987/donconnect/dock
 ```
 
-## deStream
-
-Use the client id and user access token from deStream OAuth.
+Recommended OBS Browser Source sizes:
 
 ```text
-DonConnect - Setup DeStream
-deStreamClientId = your ClientId
-deStreamAccessToken = your access_token
-deStreamTokenType = Bearer
+Donation alert:  1280 x 720
+Goal:            1280 x 520
+Timer:           1280 x 420
+Credits:         1920 x 1080
+Leaderboard:     1280 x 720
+OBS dock panel:  OBS custom browser dock
 ```
 
-## DonatePay
+## What Is Included In Beta 2
 
-Use the API access key from DonatePay `API` settings. DonatePay RU and DonatePay EU are separate because streamers can receive donations through both domains at the same time.
+- Built-in browser editor served from the Streamer.bot extension itself.
+- Donation alert widget with media library, custom tests, replay history, text-to-speech, and blacklist filtering.
+- Goal widget with presets, horizontal/vertical progress, image-fill modes, provider labels, last donor settings, and detailed layout controls.
+- Timer widget with presets, count-up mode, donation-to-time conversion, and manual test amount.
+- Credits widget with Streamer.bot credits data, pause button, section toggles, presets, and live style editing.
+- Leaderboard widget with presets, editable entries, blacklist filtering, and recent donation history.
+- OBS dock panel for recent donations and replay buttons.
+- Local JSON settings stored in the DonConnect folder next to Streamer.bot, not in AppData.
+- Update check on startup.
 
-Setup actions:
+## Update Notifications
+
+On startup, DonConnect checks:
 
 ```text
-DonConnect - Setup DonatePay RU
-DonConnect - Setup DonatePay EU
+https://raw.githubusercontent.com/DrPlankton/DonConnect/main/version.json
 ```
 
-Arguments:
+If the installed version is older, DonConnect sends one short chat message with the new version and download link. It does not upload tokens, settings, donation messages, or personal data.
+
+## Duplicate Donation Warning
+
+Some services can proxy donations through another provider. For example, StreamElements may send a donation that also appears through DonatePay EU, and ODA can aggregate DonationAlerts, DonatePay, DonateX, and other providers.
+
+If you connect both the aggregator and the original provider, test carefully. DonConnect has deduplication, but provider APIs do not always expose the same donor name or transaction id.
+
+## Variables Exposed To Streamer.bot
+
+DonConnect keeps normalized donation variables available for user actions:
 
 ```text
-donatePayApiKey = your DonatePay API access key from the same domain
-donatePayApiHost = https://donatepay.ru or https://donatepay.eu
+donationSource
+donationUser
+donationAmount
+donationCurrency
+donationMessage
+donationId
+donationTimestamp
+donationRawJson
+donationIsAnonymous
 ```
 
-DonConnect polls successful donation transactions. On first start it marks the existing DonatePay history as already seen, so old donations are not replayed into Streamer.bot.
-
-## Donate.Stream
-
-Use the widget/API token from Donate.Stream. If Donate.Stream changes its private cabinet endpoint, pass a full `donateStreamEndpoint`.
+Compatibility aliases are also kept:
 
 ```text
-DonConnect - Setup DonateStream
-donateStreamToken = your Donate.Stream token
-donateStreamEndpoint = optional full polling endpoint
+tipUser
+tipAmount
+tipCurrency
+tipMessage
 ```
-
-## Custom Triggers
-
-Create your own Streamer.bot action and add:
-
-```text
-Add -> Custom -> DonConnect -> Donations
-```
-
-If the `DonConnect` submenu is not visible immediately after import, run the setup action for the provider you use or `DonConnect - Test Donation` once. This is only needed because Streamer.bot creates custom trigger menus after the code registers them.
-
-Available triggers:
-
-```text
-Any donation
-DonationAlerts donation
-DonatePay donation
-DonatePay RU donation
-DonatePay EU donation
-StreamElements donation
-Streamlabs donation
-Generic API donation
-Donate.Stream donation
-deStream donation
-DonateX.gg donation
-```
-
-## Variables
-
-DonConnect passes these variables to donation-triggered actions:
-
-| Variable | Description |
-| --- | --- |
-| `donationSource` | Source name, for example `DonationAlerts` |
-| `donationProvider` | Provider name |
-| `donationEventType` | Event type, usually `donation` |
-| `donationUser` | Donor/tipper name |
-| `donationAmount` | Donation amount |
-| `donationCurrency` | Currency |
-| `donationMessage` | Donation message |
-| `donationId` | Provider donation ID |
-| `donationTimestamp` | UTC timestamp |
-| `donationRawJson` | Raw provider JSON |
-| `donationIsAnonymous` | `True` or `False` |
-
-Aliases:
-
-| Variable | Description |
-| --- | --- |
-| `tipSource` | Same as `donationSource` |
-| `tipUser` | Same as `donationUser` |
-| `tipUsername` | Same as `donationUser`. Alias for older message templates. |
-| `tipName` | Same as `donationUser` |
-| `tipAmount` | Same as `donationAmount` |
-| `tipCurrency` | Same as `donationCurrency` |
-| `tipMessage` | Same as `donationMessage` |
-
-Example chat message:
-
-```text
-Thank you, %donationUser%, for %donationAmount% %donationCurrency%! %donationMessage%
-```
-
-## Streamer.bot Credits
-
-The import includes these Credits-related actions:
-
-- `DonConnect - Credits` configures donation forwarding into Streamer.bot Credits.
-- `Add Donation To Credits` is kept as an example/manual helper in the internal group. DonConnect now writes donations to Credits directly with `CPH.AddToCredits(...)`.
-
-To enable it, run `DonConnect - Credits` with **Test Trigger**. Keep `Servers/Clients -> HTTP Server` enabled for the OBS overlay and `/GetCredits`.
-
-Settings inside `DonConnect - Credits`:
-
-```text
-STREAMERBOT_CREDITS_ENABLED=true
-STREAMERBOT_HTTP_URL=http://127.0.0.1:7474
-STREAMERBOT_CREDITS_ACTION=Add Donation To Credits
-STREAMERBOT_CREDITS_SECTION=Донаты
-STREAMERBOT_CREDITS_FIELDS=name,amount
-```
-
-The HTTP server is only needed by the OBS overlay. Donation entries are added inside Streamer.bot directly.
-
-DonConnect only adds donations to native Streamer.bot Credits. Follows, raids, chat users, top bits, moderators, and the other built-in sections are controlled by Streamer.bot `Settings -> Credits`.
-
-Primary overlay settings live in the `DonConnect - Credits` action. Run that action after editing them; it writes:
-
-```text
-D:\SBBOTcodex\DonConnect\credits\credits-config.json
-```
-
-Recommended OBS URL:
-
-```text
-http://127.0.0.1:7474/credits/streamerbot-credits-overlay.html?v=6
-```
-
-Donation display fields:
-
-| Value | Shows |
-| --- | --- |
-| `name` | Donor name. This is always the main line. |
-| `amount` | Amount and currency. |
-| `platform` | Donation provider. |
-| `message` | Donation message. |
-
-Overlay URL parameters:
-
-| Parameter | Example | Description |
-| --- | --- | --- |
-| `duration` | `duration=90s` | Scroll speed. Higher is slower. |
-| `accent` | `accent=%23ffcf5a` | Heading color. Use `%23` instead of `#`. |
-| `text` | `text=%23ffffff` | Main text color. |
-| `muted` | `muted=%23b9d8d2` | Detail text color. |
-| `font` | `font=Arial` | Font family. |
-| `top` | `top=week` | Show top bits. Default is `none`. |
-| `donationFields` | `donationFields=name,amount,message` | Override donation fields in the overlay URL. |
-
-Section labels are configured in `STREAMERBOT_CREDITS_SECTION_LABELS`:
-
-```text
-Follows=フォロー;Raided=レイド;Moderator=Moderators;Users=Viewers;донаты=Donations
-```
-
-Recommended OBS URL:
-
-```text
-http://127.0.0.1:7474/credits/streamerbot-credits-overlay.html?v=4&duration=90s
-```
-
-The credits overlay and helper examples live in:
-
-```text
-docs/examples/integrations/
-```
-
-## Chat Commands
-
-Streamer.bot may import commands as disabled for safety. This is normal. The main setup flow uses **Test Trigger**, not chat commands.
-
-If you enable commands manually, keep them restricted to `Broadcaster` only. The import file is prepared with Broadcaster-only permissions.
 
 ## Security
 
-- Do not hardcode or commit real tokens.
-- Do not publish DonationAlerts `Client Secret`.
-- Do not publish StreamElements `JWT Token`.
-- Streamer.bot global variables are convenient, but they are not a full secure secret vault.
-- A shared DonationAlerts app is beginner-friendly, but a `Client Secret` inside `.sb` or C# can be extracted by advanced users.
+The local editor server binds only to:
 
-## License
+```text
+127.0.0.1
+```
 
-MIT. See `LICENSE`.
+It is not exposed to the local network and does not require admin rights or HTTPS certificates. Tokens and secrets are not printed in full logs.
+
+## Troubleshooting
+
+If the editor does not open, run `DonConnect - Widget Editor` again and check the Streamer.bot log for the local URL.
+
+If port `3987` is busy, close the other local process using that port or restart Streamer.bot.
+
+If OBS does not update, make sure Streamer.bot is running, the widget editor action was started once, and the OBS Browser Source URL starts with `http://127.0.0.1:3987/donconnect/`.
+
+If a provider does not connect, run the DonConnect diagnostics action and check whether the provider is enabled and connected.
