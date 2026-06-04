@@ -26,7 +26,7 @@ DonConnect - расширение для Streamer.bot, которое прини
 Для тестеров Beta 2 DonationAlerts подключается самым простым способом.
 
 1. Импортируйте `DonConnect.Beta2.sb` в Streamer.bot.
-2. Найдите action `DonConnect - DonationAlerts Shared Auth`.
+2. Найдите action `DonConnect - Setup DonationAlerts`.
 3. В панели **Triggers** нажмите правой кнопкой по **Command Trigger** и выберите **Test Trigger**.
 4. В браузере откроется страница входа DonationAlerts.
 5. Войдите в свой аккаунт DonationAlerts и разрешите доступ.

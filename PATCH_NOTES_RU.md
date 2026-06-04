@@ -46,7 +46,7 @@ Beta 2 превращает DonConnect из простого моста дона
 Достаточно:
 
 1. Импортировать `DonConnect.Beta2.sb`.
-2. Запустить `DonConnect - DonationAlerts Shared Auth`.
+2. Запустить `DonConnect - Setup DonationAlerts`.
 3. Войти в свой аккаунт DonationAlerts в браузере.
 4. Разрешить доступ.
 

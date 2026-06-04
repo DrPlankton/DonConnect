@@ -32,7 +32,7 @@ DonConnect is a Streamer.bot extension for receiving donations from several serv
 For Beta 2 testers, DonationAlerts is the easiest provider to connect.
 
 1. Import `DonConnect.Beta2.sb` into Streamer.bot.
-2. Find the action `DonConnect - DonationAlerts Shared Auth`.
+2. Find the action `DonConnect - Setup DonationAlerts`.
 3. Right-click its **Command Trigger** and choose **Test Trigger**.
 4. A DonationAlerts login page will open in your browser.
 5. Log in to your own DonationAlerts account and allow access.
