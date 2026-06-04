@@ -16,7 +16,7 @@ public class CPHInline
 {
     private static DonationBridgeRuntime Runtime;
     private static readonly object GlobalDedupeLock = new object();
-    private const string CurrentVersion = "0.12.1-beta.2";
+    private const string CurrentVersion = "0.12.1-beta.2.1";
     private const string UpdateFeedUrl = "https://raw.githubusercontent.com/DrPlankton/DonConnect/main/version.json";
     private const string BundledDonationAlertsClientId = "18717";
     private const string BundledDonationAlertsClientSecret = "XxOAjz0FeUQlzNWjmWwzxZGpeGb57hSEt0dZskB6";
@@ -5497,13 +5497,14 @@ public class DonConnectWidgetServer
 {
     private const string Host = "127.0.0.1";
     private const int DefaultPort = 3987;
-    private const string EditorVersion = "0.12.1";
+    private const string EditorVersion = "0.12.1-beta.2.1";
     private const int MaxHttpBodyBytes = 48 * 1024 * 1024;
     private const int MaxAlertMediaBytes = 32 * 1024 * 1024;
     private readonly BridgeSettings BridgeSettings;
     private readonly BridgeLogger Logger;
     private readonly Action<UnifiedDonationEvent> DonationHandler;
     private readonly object StateLock = new object();
+    private readonly object SpeechLock = new object();
     private TcpListener Listener;
     private CancellationTokenSource Cancellation;
     private WidgetSettings CurrentSettings;
@@ -5617,6 +5618,8 @@ public class DonConnectWidgetServer
 
     public void PushDonation(UnifiedDonationEvent donation)
     {
+        JObject speechDonation;
+        WidgetSettings speechSettings;
         lock (StateLock)
         {
             LastDonation = DonationToJson(donation ?? DefaultDonation());
@@ -5624,7 +5627,143 @@ public class DonConnectWidgetServer
             AddCreditDonation(LastDonation);
             AddLeaderboardDonation(LastDonation);
             EventId++;
+            speechDonation = (JObject)LastDonation.DeepClone();
+            speechSettings = CurrentSettings;
         }
+
+        SpeakDonationIfEnabled(speechDonation, speechSettings);
+    }
+
+    private void SpeakDonationIfEnabled(JObject donation, WidgetSettings settings)
+    {
+        if (settings == null || !settings.SpeakDonation)
+            return;
+
+        string text = BuildSpeechText(donation);
+        if (string.IsNullOrWhiteSpace(text))
+            return;
+
+        Task.Run(delegate
+        {
+            try
+            {
+                lock (SpeechLock)
+                    SpeakWithWindowsVoice(text, settings);
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug("Donation speech skipped. " + ex.Message);
+            }
+        });
+    }
+
+    private string BuildSpeechText(JObject donation)
+    {
+        if (donation == null)
+            return "";
+
+        var parts = new List<string>();
+        AddSpeechPart(parts, JsonText(donation, "donor"));
+        string amount = string.Join(" ", new[] { JsonText(donation, "amount"), JsonText(donation, "currency") }.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray());
+        AddSpeechPart(parts, amount);
+        AddSpeechPart(parts, JsonText(donation, "provider"));
+        AddSpeechPart(parts, JsonText(donation, "message"));
+        return string.Join(". ", parts.ToArray());
+    }
+
+    private static void AddSpeechPart(List<string> parts, string value)
+    {
+        string text = (value ?? "").Trim();
+        if (!string.IsNullOrWhiteSpace(text))
+            parts.Add(text);
+    }
+
+    private void SpeakWithWindowsVoice(string text, WidgetSettings settings)
+    {
+        Type synthType = Type.GetType("System.Speech.Synthesis.SpeechSynthesizer, System.Speech");
+        if (synthType == null)
+            throw new InvalidOperationException("System.Speech is not available.");
+
+        object synthesizer = Activator.CreateInstance(synthType);
+        try
+        {
+            string voice = (settings.SpeechVoice ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(voice))
+            {
+                try { synthType.GetMethod("SelectVoice", new[] { typeof(string) }).Invoke(synthesizer, new object[] { voice }); }
+                catch { }
+            }
+
+            var rateProperty = synthType.GetProperty("Rate");
+            if (rateProperty != null)
+                rateProperty.SetValue(synthesizer, SpeechRateToWindows(settings.SpeechRate), null);
+
+            var volumeProperty = synthType.GetProperty("Volume");
+            if (volumeProperty != null)
+                volumeProperty.SetValue(synthesizer, Math.Max(0, Math.Min(100, settings.SpeechVolume)), null);
+
+            synthType.GetMethod("Speak", new[] { typeof(string) }).Invoke(synthesizer, new object[] { text });
+        }
+        finally
+        {
+            IDisposable disposable = synthesizer as IDisposable;
+            if (disposable != null)
+                disposable.Dispose();
+        }
+    }
+
+    private static int SpeechRateToWindows(double rate)
+    {
+        double normalized = Math.Max(0.5, Math.Min(2.0, rate));
+        return Math.Max(-10, Math.Min(10, (int)Math.Round((normalized - 1.0) * 10.0)));
+    }
+
+    private JArray WindowsSpeechVoices()
+    {
+        var voices = new JArray();
+        Type synthType = Type.GetType("System.Speech.Synthesis.SpeechSynthesizer, System.Speech");
+        if (synthType == null)
+            return voices;
+
+        object synthesizer = Activator.CreateInstance(synthType);
+        try
+        {
+            object installedVoices = synthType.GetMethod("GetInstalledVoices", Type.EmptyTypes).Invoke(synthesizer, null);
+            var enumerable = installedVoices as System.Collections.IEnumerable;
+            if (enumerable == null)
+                return voices;
+
+            foreach (object voice in enumerable)
+            {
+                object info = voice.GetType().GetProperty("VoiceInfo").GetValue(voice, null);
+                if (info == null)
+                    continue;
+
+                string name = Convert.ToString(info.GetType().GetProperty("Name").GetValue(info, null), CultureInfo.InvariantCulture);
+                object cultureValue = info.GetType().GetProperty("Culture").GetValue(info, null);
+                string culture = cultureValue == null ? "" : cultureValue.ToString();
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+
+                var item = new JObject();
+                item["name"] = name;
+                item["lang"] = culture;
+                item["source"] = "windows";
+                voices.Add(item);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug("Windows speech voice list is unavailable. " + ex.Message);
+        }
+        finally
+        {
+            IDisposable disposable = synthesizer as IDisposable;
+            if (disposable != null)
+                disposable.Dispose();
+        }
+
+        return voices;
     }
 
     private async Task AcceptLoop(CancellationToken token)
@@ -5761,6 +5900,9 @@ public class DonConnectWidgetServer
             case "/donconnect/api/fonts":
                 WriteJson(stream, FontCatalogJson());
                 return true;
+            case "/donconnect/api/speech-voices":
+                WriteJson(stream, SpeechVoicesEndpointJson());
+                return true;
             case "/donconnect/api/alert-media":
                 WriteJson(stream, AlertMediaLibraryJson());
                 return true;
@@ -5805,6 +5947,12 @@ public class DonConnectWidgetServer
                 return true;
             case "/donconnect/api/timer-test":
                 TimerTestEndpoint(stream, body);
+                return true;
+            case "/donconnect/api/speech-test":
+                SpeechTestEndpoint(stream, body);
+                return true;
+            case "/donconnect/api/goal-reset":
+                ResetGoalEndpoint(stream);
                 return true;
             case "/donconnect/api/replay-donation":
                 ReplayDonationEndpoint(stream, body);
@@ -5975,6 +6123,50 @@ public class DonConnectWidgetServer
         }
         result["items"] = items;
         WriteJson(stream, result);
+    }
+
+    private JObject SpeechVoicesEndpointJson()
+    {
+        var result = new JObject();
+        result["items"] = WindowsSpeechVoices();
+        result["engine"] = "windows";
+        return result;
+    }
+
+    private void SpeechTestEndpoint(NetworkStream stream, string body)
+    {
+        WidgetSettings settings = CurrentSettings;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(body))
+                settings = WidgetSettings.FromJson(body);
+        }
+        catch { }
+
+        if (settings != null)
+            settings.SpeakDonation = true;
+
+        var donation = new JObject();
+        donation["donor"] = "DonConnect";
+        donation["amount"] = "100";
+        donation["currency"] = "RUB";
+        donation["provider"] = "Voice test";
+        donation["message"] = "This is a donation voice test.";
+        SpeakDonationIfEnabled(donation, settings);
+
+        var result = new JObject();
+        result["ok"] = true;
+        WriteJson(stream, result);
+    }
+
+    private void ResetGoalEndpoint(NetworkStream stream)
+    {
+        JObject settings = OverlaySettings == null ? DefaultOverlaySettings() : (JObject)OverlaySettings.DeepClone();
+        settings["GoalCurrent"] = "0";
+        OverlaySettings = NormalizeOverlaySettings(settings.ToString(Formatting.None));
+        SaveOverlaySettings(OverlaySettings);
+        BridgeSettings.Set("goal.current", "0", true);
+        WriteJson(stream, GoalTimerState());
     }
 
     private void ReplayDonationEndpoint(NetworkStream stream, string body)
@@ -8102,7 +8294,8 @@ public class DonConnectWidgetServer
         <fieldset><legend>Donation templates</legend><label><span>Text align</span><select data-donation=""TextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label><span>Donor</span><input data-donation=""DonorTemplate"" type=""text""></label><label><span>Donor font</span><select data-donation=""DonorFontFamily"" data-font-select></select></label><div class=""compact-grid""><label><span>Donor X</span><input data-donation=""DonorX"" type=""number""></label><label><span>Donor Y</span><input data-donation=""DonorY"" type=""number""></label></div><label><span>Amount</span><input data-donation=""AmountTemplate"" type=""text""></label><label><span>Amount font</span><select data-donation=""AmountFontFamily"" data-font-select></select></label><div class=""compact-grid""><label><span>Amount X</span><input data-donation=""AmountX"" type=""number""></label><label><span>Amount Y</span><input data-donation=""AmountY"" type=""number""></label></div><label><span>Message</span><input data-donation=""MessageTemplate"" type=""text""></label><label><span>Message font</span><select data-donation=""MessageFontFamily"" data-font-select></select></label><div class=""compact-grid""><label><span>Message X</span><input data-donation=""MessageX"" type=""number""></label><label><span>Message Y</span><input data-donation=""MessageY"" type=""number""></label></div><label class=""check-row""><input data-donation=""ShowPlatform"" type=""checkbox""><span>Show platform</span></label><label><span>Platform</span><input data-donation=""PlatformTemplate"" type=""text""></label><label><span>Platform font</span><select data-donation=""PlatformFontFamily"" data-font-select></select></label></fieldset>
         <fieldset><legend>Alert media library</legend><div class=""drop"" id=""alertMediaDrop"">Drop PNG/JPG/GIF/MP4/WebM/MP3/WAV here or click</div><input id=""alertMediaFile"" type=""file"" accept=""image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,audio/mpeg,audio/wav,audio/ogg,audio/mp4"" multiple hidden><div class=""buttons""><button type=""button"" id=""openAlertMedia"">Open media folder</button></div><div class=""folder-path"" id=""alertMediaPath""></div><label><span>Default visual</span><select data-donation=""MediaFile"" id=""alertMediaSelect""></select></label><label><span>Alert sound</span><select data-donation=""SoundFile"" id=""alertSoundSelect""></select></label><label><span>Text animation sound</span><select data-donation=""TextSoundFile"" id=""alertTextSoundSelect""></select></label><label><span>Visual placement</span><select data-donation=""MediaPlacement""><option value=""above"">Above text</option><option value=""below"">Below text</option><option value=""left"">Left of text</option><option value=""right"">Right of text</option><option value=""background"">Behind text</option></select></label><label><span>Visual fit</span><select data-donation=""MediaFit""><option value=""contain"">Contain</option><option value=""cover"">Cover</option></select></label><label><span>Visual width</span><div class=""row""><input data-donation=""MediaWidth"" type=""range"" min=""20"" max=""1600""><input data-donation=""MediaWidth"" type=""number""></div></label><label><span>Visual height</span><div class=""row""><input data-donation=""MediaHeight"" type=""range"" min=""20"" max=""1000""><input data-donation=""MediaHeight"" type=""number""></div></label><label><span>Visual X</span><div class=""row""><input data-donation=""MediaX"" type=""range"" min=""-800"" max=""800""><input data-donation=""MediaX"" type=""number""></div></label><label><span>Visual Y</span><div class=""row""><input data-donation=""MediaY"" type=""range"" min=""-600"" max=""600""><input data-donation=""MediaY"" type=""number""></div></label><label class=""check-row""><input data-donation=""VideoMuted"" type=""checkbox""><span>Mute video audio</span></label><div class=""media-grid"" id=""alertMediaGrid""></div></fieldset>
         <fieldset><legend>Amount rules</legend><p class=""folder-path"">The most specific matching minimum amount wins. Select several files to randomize them.</p><div id=""alertRules""></div><button type=""button"" id=""addAlertRule"">Add amount rule</button></fieldset>
-        <fieldset><legend>Alert animations</legend><label class=""check-row""><input data-donation=""ShowBackground"" type=""checkbox""><span>Show background</span></label><label><span>Visible duration, ms</span><input data-donation=""DisplayDuration"" type=""number"" min=""500"" max=""60000"" step=""100""></label><label><span>Entry animation</span><select data-donation=""EntryAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide from left</option><option value=""slide-right"">Slide from right</option><option value=""slide-up"">Slide from bottom</option><option value=""slide-down"">Slide from top</option><option value=""zoom"">Zoom</option></select></label><label><span>Exit animation</span><select data-donation=""ExitAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide left</option><option value=""slide-right"">Slide right</option><option value=""slide-up"">Slide up</option><option value=""slide-down"">Slide down</option><option value=""zoom"">Zoom</option><option value=""scatter"">Scatter</option></select></label><label><span>Donor text animation</span><select data-donation=""TextAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""typewriter"">Typewriter</option><option value=""reveal-left"">Reveal left to right</option><option value=""slide-up"">Slide up</option></select></label><label><span>Alert volume</span><div class=""row""><input data-donation=""SoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""SoundVolume"" type=""number""></div></label><label><span>Text sound volume</span><div class=""row""><input data-donation=""TextSoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""TextSoundVolume"" type=""number""></div></label><label class=""check-row""><input data-donation=""SpeakDonation"" type=""checkbox""><span>Read donation text aloud</span></label><label><span>Voice</span><select data-donation=""SpeechVoice"" id=""speechVoiceSelect""></select></label><label><span>Voice speed</span><div class=""row""><input data-donation=""SpeechRate"" type=""range"" min=""0.5"" max=""2"" step=""0.05""><input data-donation=""SpeechRate"" type=""number"" min=""0.5"" max=""2"" step=""0.05""></div></label><label><span>Voice pitch</span><div class=""row""><input data-donation=""SpeechPitch"" type=""range"" min=""0.5"" max=""2"" step=""0.05""><input data-donation=""SpeechPitch"" type=""number"" min=""0.5"" max=""2"" step=""0.05""></div></label><label><span>Voice volume</span><div class=""row""><input data-donation=""SpeechVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""SpeechVolume"" type=""number""></div></label></fieldset>
+        <fieldset><legend>Alert animations</legend><label class=""check-row""><input data-donation=""ShowBackground"" type=""checkbox""><span>Show background</span></label><label><span>Visible duration, ms</span><input data-donation=""DisplayDuration"" type=""number"" min=""500"" max=""60000"" step=""100""></label><label><span>Entry animation</span><select data-donation=""EntryAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide from left</option><option value=""slide-right"">Slide from right</option><option value=""slide-up"">Slide from bottom</option><option value=""slide-down"">Slide from top</option><option value=""zoom"">Zoom</option></select></label><label><span>Exit animation</span><select data-donation=""ExitAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide left</option><option value=""slide-right"">Slide right</option><option value=""slide-up"">Slide up</option><option value=""slide-down"">Slide down</option><option value=""zoom"">Zoom</option><option value=""scatter"">Scatter</option></select></label><label><span>Donor text animation</span><select data-donation=""TextAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""typewriter"">Typewriter</option><option value=""reveal-left"">Reveal left to right</option><option value=""slide-up"">Slide up</option></select></label><label><span>Alert volume</span><div class=""row""><input data-donation=""SoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""SoundVolume"" type=""number""></div></label><label><span>Text sound volume</span><div class=""row""><input data-donation=""TextSoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""TextSoundVolume"" type=""number""></div></label></fieldset>
+        <fieldset><legend>Donation voice</legend><p class=""note"" id=""speechHint"">Windows voice reads the donation from the extension itself. Use Test voice after choosing a voice.</p><label class=""check-row""><input data-donation=""SpeakDonation"" type=""checkbox""><span>Read donation text aloud</span></label><label><span>Voice</span><select data-donation=""SpeechVoice"" id=""speechVoiceSelect""></select></label><label><span>Voice speed</span><div class=""row""><input data-donation=""SpeechRate"" type=""range"" min=""0.5"" max=""2"" step=""0.05""><input data-donation=""SpeechRate"" type=""number"" min=""0.5"" max=""2"" step=""0.05""></div></label><label><span>Voice pitch</span><div class=""row""><input data-donation=""SpeechPitch"" type=""range"" min=""0.5"" max=""2"" step=""0.05""><input data-donation=""SpeechPitch"" type=""number"" min=""0.5"" max=""2"" step=""0.05""></div></label><label><span>Voice volume</span><div class=""row""><input data-donation=""SpeechVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""SpeechVolume"" type=""number""></div></label><button type=""button"" id=""testSpeech"">Test voice</button></fieldset>
         <fieldset><legend>Custom test alert</legend><label><span>Donor</span><input id=""customTestDonor"" type=""text"" value=""Custom viewer""></label><label><span>Amount</span><input id=""customTestAmount"" type=""number"" value=""777"" step=""0.01""></label><label><span>Currency</span><input id=""customTestCurrency"" type=""text"" value=""RUB""></label><label><span>Platform</span><input id=""customTestPlatform"" type=""text"" value=""Custom test""></label><label><span>Message</span><textarea id=""customTestMessage"" rows=""3"">Custom alert preview</textarea></label><button type=""button"" id=""sendCustomTest"">Send custom alert</button></fieldset>
       </div>
 
@@ -8159,7 +8352,7 @@ public class DonConnectWidgetServer
     let active = 'donation';
     let lang = 'en';
     const fallbackFonts = { windows:['Segoe UI','Arial','Calibri','Verdana','Tahoma','Trebuchet MS','Georgia','Times New Roman','Consolas','Courier New','Impact','Comic Sans MS'], google:[] };
-    let donation = {}; let overlay = {}; let credits = {}; let leaderboard = {}; let contentFilter = {}; let fonts = cloneFontCatalog(fallbackFonts); let alertMedia = { items:[], directory:'', maxUploadBytes:33554432 };
+    let donation = {}; let overlay = {}; let credits = {}; let leaderboard = {}; let contentFilter = {}; let fonts = cloneFontCatalog(fallbackFonts); let speechVoices = { items:[] }; let alertMedia = { items:[], directory:'', maxUploadBytes:33554432 };
     const urls = { donation:'/donconnect/widget', history:'/donconnect/dock', goal:'/donconnect/goal', timer:'/donconnect/timer', credits:'/donconnect/credits', leaderboard:'/donconnect/leaderboard', filter:'/donconnect/widget' };
     const serviceNames = ['DonationAlerts','StreamElements','Streamlabs','DonatePay RU','DonatePay EU','Donate.Stream','deStream','DonateX.gg','ODA','Generic API'];
     const donationDefaults = { Width:680, Height:360, BorderRadius:18, Padding:26, FontSize:28, Opacity:.88, BackgroundColor:'#10131a', TextColor:'#f8fbff', AccentColor:'#35d07f', AnimationDuration:650, FontFamily:'Segoe UI', DonorFontFamily:'', AmountFontFamily:'', MessageFontFamily:'', PlatformFontFamily:'', DonorTemplate:'{donor}', AmountTemplate:'{amount} {currency}', MessageTemplate:'{message}', PlatformTemplate:'{platform}', ShowBackground:true, ShowProgressBar:false, ShowPlatform:true, DisplayDuration:9000, EntryAnimation:'fade', ExitAnimation:'fade', TextAnimation:'fade', MediaFile:'', SoundFile:'', TextSoundFile:'', MediaFit:'contain', MediaPlacement:'above', MediaWidth:260, MediaHeight:170, MediaX:0, MediaY:0, TextAlign:'center', DonorX:0, DonorY:0, AmountX:0, AmountY:0, MessageX:0, MessageY:0, SoundVolume:75, TextSoundVolume:45, SpeakDonation:false, SpeechVoice:'', SpeechRate:1, SpeechPitch:1, SpeechVolume:85, VideoMuted:true, AlertRules:[], PresetName:'Minimal Dark', Language:'en' };
@@ -8206,9 +8399,9 @@ public class DonConnectWidgetServer
     Object.assign(i18n.en, { recommendedObsSize:'Recommended OBS Browser Source size: ', mediaDrop:'Drop PNG/JPG/GIF/MP4/WebM/MP3/WAV here or click', noVisual:'No visual', noSound:'No sound', noTextSound:'No text sound', previewFile:'Preview', builtIn:'built-in', name:'Name', saveRow:'Save row', deleteRow:'Delete row', timerNote:'Example: amount 100 and seconds 3600 means 100 RUB = 60 min.', servicesNote:'Only enabled providers are shown. Clear a checkbox to hide a provider from Goal.', creditsNote:'Streamer.bot HTTP Server must be enabled on 127.0.0.1:7474. DonConnect falls back to local examples if it is unavailable.', leaderboardNote:'Add a custom row or edit names from received donations. Deleting a row automatically moves the next place up.', filterNote:'One item per line. The filter changes browser widgets only and keeps original Streamer.bot donation variables untouched.', aboveText:'Above text', belowText:'Below text', leftText:'Left of text', rightText:'Right of text', behindText:'Behind text', contain:'Contain', cover:'Cover', countdownMode:'Countdown: donations add time', countupMode:'Count up: reset to zero on event' });
     Object.assign(i18n.ru, { recommendedObsSize:'Рекомендуемый размер Browser Source в OBS: ', mediaDrop:'Перетащите PNG/JPG/GIF/MP4/WebM/MP3/WAV сюда или нажмите', noVisual:'Без визуала', noSound:'Без звука', noTextSound:'Без звука текста', previewFile:'Просмотр', builtIn:'встроенный', name:'Имя', saveRow:'Сохранить строку', deleteRow:'Удалить строку', timerNote:'Пример: сумма 100 и 3600 секунд означают 100 RUB = 60 мин.', servicesNote:'Показываются только включенные площадки. Снимите галочку, чтобы скрыть площадку из цели.', creditsNote:'В Streamer.bot должен быть включен HTTP Server на 127.0.0.1:7474. Если он недоступен, DonConnect покажет локальные примеры.', leaderboardNote:'Добавьте строку вручную или исправьте имя из полученного доната. После удаления строки следующее место поднимется автоматически.', filterNote:'Один ник или слово на строку. Фильтр меняет только браузерные виджеты и сохраняет исходные переменные доната Streamer.bot.', aboveText:'Над текстом', belowText:'Под текстом', leftText:'Слева от текста', rightText:'Справа от текста', behindText:'За текстом', contain:'Вписать', cover:'Заполнить', countdownMode:'Обратный отсчет: донаты добавляют время', countupMode:'Отсчет вперед: событие сбрасывает таймер до нуля' });
     Object.assign(i18n.uk, { recommendedObsSize:'Рекомендований розмір Browser Source в OBS: ', mediaDrop:'Перетягніть PNG/JPG/GIF/MP4/WebM/MP3/WAV сюди або натисніть', noVisual:'Без візуалу', noSound:'Без звуку', noTextSound:'Без звуку тексту', previewFile:'Перегляд', builtIn:'вбудований', name:'Імʼя', saveRow:'Зберегти рядок', deleteRow:'Видалити рядок', timerNote:'Приклад: сума 100 і 3600 секунд означають 100 RUB = 60 хв.', servicesNote:'Показуються лише увімкнені платформи. Зніміть позначку, щоб приховати платформу з цілі.', creditsNote:'У Streamer.bot має бути увімкнений HTTP Server на 127.0.0.1:7474. Якщо він недоступний, DonConnect покаже локальні приклади.', leaderboardNote:'Додайте рядок вручну або виправте імʼя з отриманого донату. Після видалення рядка наступне місце підніметься автоматично.', filterNote:'Один нік або слово на рядок. Фільтр змінює лише браузерні віджети та зберігає початкові змінні донату Streamer.bot.', aboveText:'Над текстом', belowText:'Під текстом', leftText:'Ліворуч від тексту', rightText:'Праворуч від тексту', behindText:'За текстом', contain:'Вписати', cover:'Заповнити', countdownMode:'Зворотний відлік: донати додають час', countupMode:'Відлік уперед: подія скидає таймер до нуля' });
-    Object.assign(i18n.en, { history:'Repeats', recentDonationsTitle:'Recent donations', noRecentDonations:'No recent donations yet', replay:'Replay', addFont:'Add font', customFontPlaceholder:'Installed font name', fontAdded:'Font added to the selectors', timerCustomTest:'Timer custom test', sendTimerTest:'Send timer test', creditsSections:'Credits sections', transparentBackground:'Transparent background', pauseCredits:'Pause credits preview', resumeCredits:'Resume credits preview', restartCredits:'Restart credits preview', hiddenSectionNote:'Clear a checkbox to hide a section from Streamer.bot Credits.', filterTestDonation:'Blocked test donation', sendFilterTest:'Send blocked test', speakDonation:'Read donation text aloud', speechVoice:'Voice', speechRate:'Voice speed', speechPitch:'Voice pitch', speechVolume:'Voice volume', defaultVoice:'Default browser voice', lastTenOnly:'Only the latest 10 rows are shown here.' });
-    Object.assign(i18n.ru, { history:'Повторы', recentDonationsTitle:'Последние донаты', noRecentDonations:'Последних донатов пока нет', replay:'Повторить', addFont:'Добавить шрифт', customFontPlaceholder:'Название установленного шрифта', fontAdded:'Шрифт добавлен в списки выбора', timerCustomTest:'Кастомный тест таймера', sendTimerTest:'Отправить тест таймера', creditsSections:'Секции титров', transparentBackground:'Прозрачный фон', pauseCredits:'Пауза титров', resumeCredits:'Продолжить титры', restartCredits:'Перезапустить титры', hiddenSectionNote:'Снимите галочку, чтобы скрыть секцию из титров Streamer.bot.', filterTestDonation:'Кастомный тест запрета', sendFilterTest:'Отправить тест запрета', speakDonation:'Зачитывать текст доната', speechVoice:'Голос', speechRate:'Скорость голоса', speechPitch:'Тон голоса', speechVolume:'Громкость голоса', defaultVoice:'Голос браузера по умолчанию', lastTenOnly:'Здесь показываются только последние 10 строк.' });
-    Object.assign(i18n.uk, { history:'Повтори', recentDonationsTitle:'Останні донати', noRecentDonations:'Останніх донатів поки немає', replay:'Повторити', addFont:'Додати шрифт', customFontPlaceholder:'Назва встановленого шрифту', fontAdded:'Шрифт додано до списків вибору', timerCustomTest:'Власний тест таймера', sendTimerTest:'Надіслати тест таймера', creditsSections:'Секції титрів', transparentBackground:'Прозорий фон', pauseCredits:'Пауза титрів', resumeCredits:'Продовжити титри', restartCredits:'Перезапустити титри', hiddenSectionNote:'Зніміть позначку, щоб приховати секцію з титрів Streamer.bot.', filterTestDonation:'Власний тест заборони', sendFilterTest:'Надіслати тест заборони', speakDonation:'Зачитувати текст донату', speechVoice:'Голос', speechRate:'Швидкість голосу', speechPitch:'Тон голосу', speechVolume:'Гучність голосу', defaultVoice:'Голос браузера за замовчуванням', lastTenOnly:'Тут показуються лише останні 10 рядків.' });
+    Object.assign(i18n.en, { history:'Repeats', recentDonationsTitle:'Recent donations', noRecentDonations:'No recent donations yet', replay:'Replay', addFont:'Add font', customFontPlaceholder:'Installed font name', fontAdded:'Font added to the selectors', timerCustomTest:'Timer custom test', sendTimerTest:'Send timer test', creditsSections:'Credits sections', transparentBackground:'Transparent background', pauseCredits:'Pause credits preview', resumeCredits:'Resume credits preview', restartCredits:'Restart credits preview', hiddenSectionNote:'Clear a checkbox to hide a section from Streamer.bot Credits.', filterTestDonation:'Blocked test donation', sendFilterTest:'Send blocked test', donationVoice:'Donation voice', testSpeech:'Test voice', speechHint:'Windows reads donation text from DonConnect itself. Pick a voice, enable reading, then press Test voice.', speechTestStarted:'Voice test started', speakDonation:'Read donation text aloud', speechVoice:'Voice', speechRate:'Voice speed', speechPitch:'Voice pitch', speechVolume:'Voice volume', defaultVoice:'Default Windows voice', lastTenOnly:'Only the latest 10 rows are shown here.' });
+    Object.assign(i18n.ru, { history:'Повторы', recentDonationsTitle:'Последние донаты', noRecentDonations:'Последних донатов пока нет', replay:'Повторить', addFont:'Добавить шрифт', customFontPlaceholder:'Название установленного шрифта', fontAdded:'Шрифт добавлен в списки выбора', timerCustomTest:'Кастомный тест таймера', sendTimerTest:'Отправить тест таймера', creditsSections:'Секции титров', transparentBackground:'Прозрачный фон', pauseCredits:'Пауза титров', resumeCredits:'Продолжить титры', restartCredits:'Перезапустить титры', hiddenSectionNote:'Снимите галочку, чтобы скрыть секцию из титров Streamer.bot.', filterTestDonation:'Кастомный тест запрета', sendFilterTest:'Отправить тест запрета', donationVoice:'Озвучка доната', testSpeech:'Проверить голос', speechHint:'Текст доната зачитывается голосом Windows прямо из DonConnect. Выбери голос, включи озвучку и нажми проверку.', speechTestStarted:'Проверка голоса запущена', speakDonation:'Зачитывать текст доната', speechVoice:'Голос', speechRate:'Скорость голоса', speechPitch:'Тон голоса', speechVolume:'Громкость голоса', defaultVoice:'Голос Windows по умолчанию', lastTenOnly:'Здесь показываются только последние 10 строк.' });
+    Object.assign(i18n.uk, { history:'Повтори', recentDonationsTitle:'Останні донати', noRecentDonations:'Останніх донатів поки немає', replay:'Повторити', addFont:'Додати шрифт', customFontPlaceholder:'Назва встановленого шрифту', fontAdded:'Шрифт додано до списків вибору', timerCustomTest:'Власний тест таймера', sendTimerTest:'Надіслати тест таймера', creditsSections:'Секції титрів', transparentBackground:'Прозорий фон', pauseCredits:'Пауза титрів', resumeCredits:'Продовжити титри', restartCredits:'Перезапустити титри', hiddenSectionNote:'Зніміть позначку, щоб приховати секцію з титрів Streamer.bot.', filterTestDonation:'Власний тест заборони', sendFilterTest:'Надіслати тест заборони', donationVoice:'Озвучення донату', testSpeech:'Перевірити голос', speechHint:'Текст донату читається голосом Windows прямо з DonConnect. Обери голос, увімкни озвучення і натисни перевірку.', speechTestStarted:'Перевірку голосу запущено', speakDonation:'Зачитувати текст донату', speechVoice:'Голос', speechRate:'Швидкість голосу', speechPitch:'Тон голосу', speechVolume:'Гучність голосу', defaultVoice:'Голос Windows за замовчуванням', lastTenOnly:'Тут показуються лише останні 10 рядків.' });
     Object.assign(i18n.en, { donationAmountStep:'Amount that gives one time step', secondsPerStep:'Seconds added for that amount' });
     Object.assign(i18n.ru, { donationAmountStep:'Сумма, за которую добавляется шаг времени', secondsPerStep:'Сколько секунд добавить за эту сумму' });
     Object.assign(i18n.uk, { donationAmountStep:'Сума, за яку додається крок часу', secondsPerStep:'Скільки секунд додати за цю суму' });
@@ -8224,6 +8417,7 @@ public class DonConnectWidgetServer
         leaderboard = Object.assign({}, leaderboardDefaults, await fetchJson('/donconnect/api/leaderboard-settings', {}));
         contentFilter = Object.assign({}, filterDefaults, await fetchJson('/donconnect/api/content-filter-settings', {}));
         fonts = normalizeFontCatalog(await fetchJson('/donconnect/api/fonts', {}));
+        speechVoices = await fetchJson('/donconnect/api/speech-voices', speechVoices);
         alertMedia = await fetchJson('/donconnect/api/alert-media', alertMedia);
       } catch (error) {
         console.error(error);
@@ -8290,6 +8484,7 @@ public class DonConnectWidgetServer
       const creditsTest = document.getElementById('testCredits'); if (creditsTest) creditsTest.addEventListener('click', testCredits);
       const pauseCredits = document.getElementById('pauseCredits'); if (pauseCredits) pauseCredits.addEventListener('click', toggleCreditsPause);
       const restartCredits = document.getElementById('restartCredits'); if (restartCredits) restartCredits.addEventListener('click', restartCreditsPreview);
+      const testSpeechButton = document.getElementById('testSpeech'); if (testSpeechButton) testSpeechButton.addEventListener('click', testSpeech);
       if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = populateSpeechVoices;
       const copyButton = document.getElementById('copy'); if (copyButton) copyButton.addEventListener('click', copyObs);
       const copyButton2 = document.getElementById('copy2'); if (copyButton2) copyButton2.addEventListener('click', copyObs);
@@ -8304,7 +8499,8 @@ public class DonConnectWidgetServer
     let statusTimer = null;
     function populateFontList() { fonts = normalizeFontCatalog(fonts); const selects = Array.from(document.querySelectorAll('[data-font-select]')); if (!selects.length) return; const windows = uniqueFonts(fonts.windows || []); const google = uniqueFonts(fonts.google || []); const options = '<option value="""">' + t('defaultFont') + '</option>' + fontGroup('Windows', windows) + fontGroup('Google Fonts', google); selects.forEach(select => { const value = select.value; select.innerHTML = options; ensureFontOption(select, value); select.value = value || ''; }); hideBaseFontRows(); }
     function hideBaseFontRows() { ['[data-donation=FontFamily]','[data-overlay=FontFamily]','[data-credits=FontFamily]','[data-leaderboard=FontFamily]'].forEach(selector => document.querySelectorAll(selector).forEach(input => { const label = input.closest('label'); if (label) label.style.display = 'none'; })); }
-    function populateSpeechVoices() { const select = document.getElementById('speechVoiceSelect'); if (!select) return; const selected = donation.SpeechVoice || select.value || ''; const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : []; select.innerHTML = '<option value="""">' + escapeHtml(t('defaultVoice')) + '</option>' + voices.map(voice => '<option value=""' + escapeAttr(voice.name) + '"">' + escapeHtml(voice.name + (voice.lang ? ' - ' + voice.lang : '')) + '</option>').join(''); ensureFontOption(select, selected); select.value = selected || ''; }
+    function populateSpeechVoices() { const select = document.getElementById('speechVoiceSelect'); if (!select) return; const selected = donation.SpeechVoice || select.value || ''; const server = Array.isArray(speechVoices && speechVoices.items) ? speechVoices.items : []; const browser = window.speechSynthesis ? window.speechSynthesis.getVoices().map(voice => ({ name:voice.name, lang:voice.lang, source:'browser' })) : []; const seen = new Set(); const all = [...server, ...browser].filter(voice => { const name = String(voice && voice.name || '').trim(); const key = name.toLowerCase(); if (!name || seen.has(key)) return false; seen.add(key); return true; }); select.innerHTML = '<option value="""">' + escapeHtml(t('defaultVoice')) + '</option>' + all.map(voice => '<option value=""' + escapeAttr(voice.name) + '"">' + escapeHtml(voice.name + (voice.lang ? ' - ' + voice.lang : '') + (voice.source ? ' (' + voice.source + ')' : '')) + '</option>').join(''); ensureFontOption(select, selected); select.value = selected || ''; }
+    async function testSpeech() { donation.SpeakDonation = true; sync('[data-donation=SpeakDonation]', true); await post('/donconnect/api/speech-test', donation); showStatus(t('speechTestStarted')); }
     function normalizeFontCatalog(source) { return { windows: uniqueFonts([...(fallbackFonts.windows || []), ...fontArray(source && source.windows)]), google: uniqueFonts([...(fallbackFonts.google || []), ...fontArray(source && source.google)]) }; }
     function fontArray(value) { if (Array.isArray(value)) return value; if (!value) return []; return [value]; }
     function cloneFontCatalog(source) { return { windows:[...((source && source.windows) || [])], google:[...((source && source.google) || [])] }; }
@@ -8414,7 +8610,8 @@ public class DonConnectWidgetServer
       setLegend('donation', 5, t('alertMedia'));
       setLegend('donation', 6, t('alertRules'));
       setLegend('donation', 7, t('alertAnimations'));
-      setLegend('donation', 8, t('customAlert'));
+      setLegend('donation', 8, t('donationVoice'));
+      setLegend('donation', 9, t('customAlert'));
       setLegend('goal', 1, t('goalPresets'));
       setLegend('goal', 2, t('goalEditor'));
       setLegend('goal', 3, t('goalText'));
@@ -8536,6 +8733,8 @@ public class DonConnectWidgetServer
       setText('#sendTimerTest', t('sendTimerTest'));
       setText('#sendFilterTest', t('sendFilterTest'));
       setText('#sendCustomTest', t('sendCustomAlert'));
+      setText('#testSpeech', t('testSpeech'));
+      setText('#speechHint', t('speechHint'));
       setText('#addLeaderboardEntry', t('addLeaderboardEntry'));
       const size = document.getElementById('obsSize');
       if (size) size.textContent = t('recommendedObsSize') + ({ donation:'1280 x 720', history:'360 x 600 OBS Dock', goal:'1280 x 520', timer:'1280 x 420', credits:'1920 x 1080', leaderboard:'1280 x 720', filter:'1280 x 720' }[active] || '1280 x 720');
@@ -8645,6 +8844,7 @@ public class DonConnectWidgetServer
     let hideTimer = null;
     let exitTimer = null;
     const preview = new URLSearchParams(location.search).has('preview');
+    const browserTts = new URLSearchParams(location.search).has('browserTts');
     let donation = { donor:'Test donor', amount:'50', currency:'RUB', message:'DonConnect live preview.', provider:'Widget Test', source:'Widget Test' };
     boot();
     window.addEventListener('message', event => { if (event.data && event.data.type === 'settings') { settings = event.data.settings; render(false); if (preview) showPreview(); } });
@@ -8774,7 +8974,7 @@ public class DonConnectWidgetServer
       if (video.classList.contains('active')) { try { video.currentTime = 0; video.play().catch(() => {}); } catch {} }
       playAudio(current.SoundFile, current.SoundVolume);
       if ((current.TextAnimation || 'none') !== 'none') playAudio(current.TextSoundFile, current.TextSoundVolume);
-      speakDonation(current);
+      if (browserTts) speakDonation(current);
       const duration = Math.max(500, Number(current.DisplayDuration || 9000));
       const animation = Math.max(0, Number(current.AnimationDuration || 650));
       exitTimer = setTimeout(() => {
@@ -9002,6 +9202,15 @@ public class DonConnectWidgetServer
     button:hover { background:#2a3746; }
     button.danger { background:#7f1d1d; border-color:#b91c1c; color:#fff; }
     button.danger:hover { background:#991b1b; }
+    .summary { display:grid; gap:8px; padding:10px 10px 0; }
+    .mini { border:1px solid #263241; border-radius:8px; background:#171f29; padding:9px; }
+    .mini-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:7px; color:#c8d3e0; font-size:12px; font-weight:800; }
+    .tiny { padding:3px 6px; border-radius:5px; font-size:11px; }
+    .mini-bar { width:100%; height:9px; overflow:hidden; border-radius:999px; background:#0b1017; border:1px solid #2a3746; }
+    .mini-bar > div { height:100%; width:0%; background:linear-gradient(90deg,#35d07f,#74f0ff); transition:width .25s ease; }
+    .mini-text { margin-top:5px; color:#9aa8b8; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .timer-mini { display:flex; align-items:center; justify-content:space-between; gap:10px; color:#c8d3e0; font-size:12px; }
+    .timer-mini strong { color:#eef4ff; font-size:16px; font-variant-numeric:tabular-nums; }
     .list { display:grid; gap:8px; padding:10px; }
     .item { display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center; padding:9px; border:1px solid #263241; border-radius:8px; background:#171f29; }
     .main { min-width:0; }
@@ -9020,22 +9229,40 @@ public class DonConnectWidgetServer
     <h1 id=""title"">DonConnect Dock</h1>
     <button id=""refresh"" type=""button"">Refresh</button>
   </header>
+  <section class=""summary"">
+    <div class=""mini"">
+      <div class=""mini-head""><span id=""goalMiniTitle"">Goal</span><button id=""resetGoal"" class=""tiny danger"" type=""button"">Reset</button></div>
+      <div class=""mini-bar""><div id=""goalMiniFill""></div></div>
+      <div id=""goalMiniText"" class=""mini-text"">0 / 0</div>
+    </div>
+    <div class=""mini timer-mini""><span id=""timerMiniTitle"">Timer</span><strong id=""timerMiniText"">00:00:00</strong></div>
+  </section>
   <main id=""list"" class=""list""><div class=""empty"">No donations yet</div></main>
   <div id=""status"" class=""status""></div>
   <script>
     const list = document.getElementById('list');
     const statusEl = document.getElementById('status');
+    const refreshButton = document.getElementById('refresh');
+    const resetGoalButton = document.getElementById('resetGoal');
+    const goalFill = document.getElementById('goalMiniFill');
+    const goalText = document.getElementById('goalMiniText');
+    const timerText = document.getElementById('timerMiniText');
+    let latestState = null;
     const i18n = {
-      en:{ title:'DonConnect Dock', refresh:'Refresh', empty:'No donations yet', repeat:'Repeat', delete:'Delete', replayed:'Alert repeated without goal/timer/credits changes', deleted:'Donation removed from dock history', waiting:'Dock is waiting for DonConnect server' },
-      ru:{ title:'Док DonConnect', refresh:'Обновить', empty:'Донатов пока нет', repeat:'Повторить', delete:'Удалить', replayed:'Алёрт повторён без изменения цели, таймера и титров', deleted:'Донат удалён из истории дока', waiting:'Док ждёт сервер DonConnect' },
-      uk:{ title:'Док DonConnect', refresh:'Оновити', empty:'Донатів поки немає', repeat:'Повторити', delete:'Видалити', replayed:'Алерт повторено без зміни цілі, таймера й титрів', deleted:'Донат видалено з історії дока', waiting:'Док чекає сервер DonConnect' }
+      en:{ title:'DonConnect Dock', refresh:'Refresh', empty:'No donations yet', repeat:'Repeat', delete:'Delete', replayed:'Alert repeated without goal/timer/credits changes', deleted:'Donation removed from dock history', waiting:'Dock is waiting for DonConnect server', loading:'Refreshing...', goal:'Goal', timer:'Timer', resetGoal:'Reset', goalReset:'Goal reset' },
+      ru:{ title:'Док DonConnect', refresh:'Обновить', empty:'Донатов пока нет', repeat:'Повторить', delete:'Удалить', replayed:'Алёрт повторён без изменения цели, таймера и титров', deleted:'Донат удалён из истории дока', waiting:'Док ждёт сервер DonConnect', loading:'Обновляю...', goal:'Цель', timer:'Таймер', resetGoal:'Сброс', goalReset:'Цель сброшена' },
+      uk:{ title:'Док DonConnect', refresh:'Оновити', empty:'Донатів поки немає', repeat:'Повторити', delete:'Видалити', replayed:'Алерт повторено без зміни цілі, таймера й титрів', deleted:'Донат видалено з історії дока', waiting:'Док чекає сервер DonConnect', loading:'Оновлюю...', goal:'Ціль', timer:'Таймер', resetGoal:'Скинути', goalReset:'Ціль скинуто' }
     };
     const lang = normalizeLanguage(localStorage.getItem('donconnectEditorLanguage') || navigator.language || 'en');
     const t = key => (i18n[lang] && i18n[lang][key]) || i18n.en[key] || key;
     document.documentElement.lang = lang;
     document.getElementById('title').textContent = t('title');
-    document.getElementById('refresh').textContent = t('refresh');
-    document.getElementById('refresh').addEventListener('click', load);
+    document.getElementById('goalMiniTitle').textContent = t('goal');
+    document.getElementById('timerMiniTitle').textContent = t('timer');
+    refreshButton.textContent = t('refresh');
+    resetGoalButton.textContent = t('resetGoal');
+    refreshButton.addEventListener('click', () => load(true));
+    resetGoalButton.addEventListener('click', resetGoal);
     function normalizeLanguage(value) { const text = String(value || '').toLowerCase(); if (text.startsWith('ru')) return 'ru'; if (text.startsWith('uk') || text.startsWith('ua')) return 'uk'; return 'en'; }
     async function json(url, options) {
       const response = await fetch(url, options || {});
@@ -9048,6 +9275,32 @@ public class DonConnectWidgetServer
     function money(item) {
       return [item.amount, item.currency].filter(Boolean).join(' ');
     }
+    function numberValue(value) {
+      const parsed = Number(String(value == null ? '' : value).replace(',', '.'));
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    function formatDuration(seconds) {
+      const total = Math.max(0, Math.floor(Number(seconds) || 0));
+      const hours = Math.floor(total / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const secs = total % 60;
+      return [hours, minutes, secs].map(value => String(value).padStart(2, '0')).join(':');
+    }
+    function renderSummary(state) {
+      latestState = state || latestState;
+      const goal = latestState && latestState.goal ? latestState.goal : {};
+      const timer = latestState && latestState.timer ? latestState.timer : {};
+      const percent = Math.max(0, Math.min(100, numberValue(goal.percent)));
+      goalFill.style.width = percent + '%';
+      goalText.textContent = goal.summary || [goal.currentText, goal.targetText].filter(Boolean).join(' / ') || '0';
+      timerText.textContent = timer.text || formatDuration(timer.seconds);
+    }
+    async function resetGoal() {
+      const state = await json('/donconnect/api/goal-reset', { method:'POST' });
+      renderSummary(state);
+      statusEl.textContent = t('goalReset');
+      setTimeout(() => statusEl.textContent = '', 2500);
+    }
     async function replay(id) {
       await json('/donconnect/api/replay-donation', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id }) });
       statusEl.textContent = t('replayed');
@@ -9059,12 +9312,19 @@ public class DonConnectWidgetServer
       await load();
       setTimeout(() => statusEl.textContent = '', 2500);
     }
-    async function load() {
+    async function load(manual) {
       try {
-        const result = await json('/donconnect/api/recent-donations', { cache:'no-store' });
+        if (manual) statusEl.textContent = t('loading');
+        const responses = await Promise.all([
+          json('/donconnect/api/recent-donations', { cache:'no-store' }),
+          json('/donconnect/api/goal-state', { cache:'no-store' })
+        ]);
+        const result = responses[0];
+        renderSummary(responses[1]);
         const items = Array.isArray(result.items) ? result.items : [];
         if (!items.length) {
           list.innerHTML = '<div class=""empty"">' + escapeHtml(t('empty')) + '</div>';
+          if (manual) statusEl.textContent = '';
           return;
         }
         list.innerHTML = items.map(item => `
@@ -9078,12 +9338,14 @@ public class DonConnectWidgetServer
           </section>`).join('');
         list.querySelectorAll('[data-replay]').forEach(button => button.addEventListener('click', () => replay(button.dataset.replay)));
         list.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteDonation(button.dataset.delete)));
+        if (manual) statusEl.textContent = '';
       } catch (error) {
         list.innerHTML = '<div class=""empty"">' + escapeHtml(t('waiting')) + '</div>';
         statusEl.textContent = error && error.message ? error.message : String(error);
       }
     }
-    load();
+    load(false);
+    setInterval(() => renderSummary(latestState), 1000);
     setInterval(load, 2500);
   </script>
 </body>

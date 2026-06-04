@@ -1,10 +1,10 @@
 {
-  "version": "0.12.1-beta.2",
-  "name": "DonConnect Beta 2",
+  "version": "0.12.1-beta.2.1",
+  "name": "DonConnect Beta 2 Hotfix 1",
   "channel": "beta",
-  "downloadUrl": "https://github.com/DrPlankton/DonConnect/raw/main/DonConnect.Beta2.sb",
-  "releaseUrl": "https://github.com/DrPlankton/DonConnect",
+  "downloadUrl": "https://github.com/DrPlankton/DonConnect/releases/download/v0.12.1-beta.2.1/DonConnect.Beta2.sb",
+  "releaseUrl": "https://github.com/DrPlankton/DonConnect/releases/tag/v0.12.1-beta.2.1",
   "changelogUrl": "https://github.com/DrPlankton/DonConnect/blob/main/CHANGELOG_RU.md",
-  "messageRu": "Доступна новая версия DonConnect Beta 2.",
-  "messageEn": "A new DonConnect Beta 2 build is available."
+  "messageRu": "Доступен DonConnect Beta 2 Hotfix 1: исправлена озвучка, OBS-док и инструкция установки.",
+  "messageEn": "DonConnect Beta 2 Hotfix 1 is available: voice reading, OBS dock, and install docs were fixed."
 }

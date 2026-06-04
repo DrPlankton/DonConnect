@@ -4,6 +4,21 @@ DonConnect - расширение для Streamer.bot, которое прини
 
 Патчноут Beta 2: [PATCH_NOTES_RU.md](PATCH_NOTES_RU.md)
 
+## Самая короткая установка для новичков
+
+1. Скачайте файл `DonConnect.Beta2.sb` из релиза.
+2. В Streamer.bot нажмите **Import**.
+3. Перетащите `DonConnect.Beta2.sb` в окно импорта или откройте файл как текст и вставьте его содержимое в **Import String**.
+4. Нажмите **Import**.
+5. В списке actions откройте группу **DonConnect Widgets**.
+6. Выберите `DonConnect - Widget Editor`.
+7. В панели **Triggers** нажмите правой кнопкой по **Command Trigger** и выберите **Test Trigger**.
+8. Откроется браузерный редактор. В нём можно скопировать ссылки для OBS.
+
+Можно импортировать Beta 2 поверх прошлой версии, но перед тестами лучше удалить старые группы/actions DonConnect и импортировать заново. Так меньше шанс поймать старые хвосты от предыдущих бет.
+
+Горячую клавишу удобно назначить вручную: добавьте к `DonConnect - Widget Editor` Hot Key trigger, например `Ctrl+Alt+D`. После этого редактор можно открывать этой комбинацией.
+
 ## Быстрый старт: где взять токены и API
 
 ### DonationAlerts
@@ -11,10 +26,11 @@ DonConnect - расширение для Streamer.bot, которое прини
 Для тестеров Beta 2 DonationAlerts подключается самым простым способом.
 
 1. Импортируйте `DonConnect.Beta2.sb` в Streamer.bot.
-2. Запустите action `DonConnect - DonationAlerts Shared Auth`.
-3. В браузере откроется страница входа DonationAlerts.
-4. Войдите в свой аккаунт DonationAlerts и разрешите доступ.
-5. Вернитесь в Streamer.bot и запустите `DonConnect - Widget Editor`.
+2. Найдите action `DonConnect - DonationAlerts Shared Auth`.
+3. В панели **Triggers** нажмите правой кнопкой по **Command Trigger** и выберите **Test Trigger**.
+4. В браузере откроется страница входа DonationAlerts.
+5. Войдите в свой аккаунт DonationAlerts и разрешите доступ.
+6. Вернитесь в Streamer.bot и запустите `DonConnect - Widget Editor`.
 
 В этой бете не нужно создавать свое API-приложение DonationAlerts. Общие тестовые данные приложения уже встроены специально для тестеров, чтобы они могли сразу подключиться к своему аккаунту.
 
@@ -49,8 +65,8 @@ DonConnect.Beta2.sb
 В Streamer.bot:
 
 1. Откройте **Import**.
-2. Откройте `DonConnect.Beta2.sb` как текстовый файл или скопируйте все содержимое файла.
-3. Вставьте содержимое в поле **Import String**.
+2. Перетащите `DonConnect.Beta2.sb` в окно импорта или откройте файл как текстовый файл.
+3. Если открывали как текст, скопируйте всё содержимое и вставьте его в **Import String**.
 4. Нажмите **Import**.
 
 После импорта в Streamer.bot появятся actions DonConnect.
@@ -63,7 +79,7 @@ DonConnect.Beta2.sb
 DonConnect - Widget Editor
 ```
 
-Он сам запускает встроенный локальный сервер и открывает редактор:
+В Streamer.bot выберите этот action, нажмите правой кнопкой по его **Command Trigger** и выберите **Test Trigger**. Action сам запускает встроенный локальный сервер и открывает редактор:
 
 ```text
 http://127.0.0.1:3987/donconnect/editor

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.1-beta.2.1 - DonConnect Beta 2 Hotfix 1
+
+- Fixed donation text-to-speech by using Windows voices from DonConnect itself.
+- Added voice toggle, voice selection, and a voice test button to the donation alert editor.
+- Added a mini goal bar, goal reset button, and mini timer to the OBS dock.
+- Fixed manual refresh in the OBS dock.
+- Updated README instructions with right-click **Test Trigger** startup steps and upgrade notes.
+
 ## 0.12.1-beta.2 - DonConnect Beta 2
 
 - Added the built-in browser widget editor served by the Streamer.bot extension itself.
