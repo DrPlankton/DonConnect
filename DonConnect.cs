@@ -16,7 +16,7 @@ public class CPHInline
 {
     private static DonationBridgeRuntime Runtime;
     private static readonly object GlobalDedupeLock = new object();
-    private const string CurrentVersion = "0.12.1-beta.2.1";
+    private const string CurrentVersion = "0.12.1-beta.2.2";
     private const string UpdateFeedUrl = "https://raw.githubusercontent.com/DrPlankton/DonConnect/main/version.json";
     private const string BundledDonationAlertsClientId = "18717";
     private const string BundledDonationAlertsClientSecret = "XxOAjz0FeUQlzNWjmWwzxZGpeGb57hSEt0dZskB6";
@@ -5497,7 +5497,7 @@ public class DonConnectWidgetServer
 {
     private const string Host = "127.0.0.1";
     private const int DefaultPort = 3987;
-    private const string EditorVersion = "0.12.1-beta.2.1";
+    private const string EditorVersion = "0.12.1-beta.2.2";
     private const int MaxHttpBodyBytes = 48 * 1024 * 1024;
     private const int MaxAlertMediaBytes = 32 * 1024 * 1024;
     private readonly BridgeSettings BridgeSettings;
@@ -5639,22 +5639,62 @@ public class DonConnectWidgetServer
         if (settings == null || !settings.SpeakDonation)
             return;
 
-        string text = BuildSpeechText(donation);
-        if (string.IsNullOrWhiteSpace(text))
-            return;
-
-        Task.Run(delegate
+        Thread thread = new Thread(new ThreadStart(delegate
         {
-            try
+            JObject result = SpeakDonationResult(donation, settings, false);
+            if (!JsonBool(result, "ok", false) && !JsonBool(result, "skipped", false))
             {
-                lock (SpeechLock)
-                    SpeakWithWindowsVoice(text, settings);
+                Logger.Warn("Donation speech failed: " + JsonText(result, "error", "unknown error"));
             }
-            catch (Exception ex)
+        }));
+        thread.IsBackground = true;
+        try { thread.SetApartmentState(ApartmentState.STA); } catch { }
+        thread.Start();
+    }
+
+    private JObject SpeakDonationResult(JObject donation, WidgetSettings settings, bool force)
+    {
+        var result = new JObject();
+        result["ok"] = false;
+        result["engine"] = "";
+        result["error"] = "";
+        result["skipped"] = false;
+
+        if (settings == null)
+        {
+            result["error"] = "Speech settings are empty.";
+            return result;
+        }
+
+        if (!force && !settings.SpeakDonation)
+        {
+            result["ok"] = true;
+            result["skipped"] = true;
+            return result;
+        }
+
+        string text = BuildSpeechText(donation);
+        result["text"] = text;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            result["error"] = "Speech text is empty.";
+            return result;
+        }
+
+        try
+        {
+            lock (SpeechLock)
             {
-                Logger.Debug("Donation speech skipped. " + ex.Message);
+                result["engine"] = SpeakWithWindowsVoice(text, settings);
             }
-        });
+            result["ok"] = true;
+        }
+        catch (Exception ex)
+        {
+            result["error"] = UnwrapException(ex).Message;
+        }
+
+        return result;
     }
 
     private string BuildSpeechText(JObject donation)
@@ -5678,11 +5718,54 @@ public class DonConnectWidgetServer
             parts.Add(text);
     }
 
-    private void SpeakWithWindowsVoice(string text, WidgetSettings settings)
+    private string SpeakWithWindowsVoice(string text, WidgetSettings settings)
     {
-        Type synthType = Type.GetType("System.Speech.Synthesis.SpeechSynthesizer, System.Speech");
+        string systemError;
+        if (TrySpeakWithSystemSpeech(text, settings, out systemError))
+            return "System.Speech";
+
+        string sapiError;
+        if (TrySpeakWithSapiVoice(text, settings, out sapiError))
+            return "SAPI.SpVoice";
+
+        if (!string.IsNullOrWhiteSpace(settings.SpeechVoice))
+        {
+            WidgetSettings fallbackSettings = SpeechSettingsWithoutVoice(settings);
+            string fallbackSystemError;
+            if (TrySpeakWithSystemSpeech(text, fallbackSettings, out fallbackSystemError))
+                return "System.Speech default voice";
+
+            string fallbackSapiError;
+            if (TrySpeakWithSapiVoice(text, fallbackSettings, out fallbackSapiError))
+                return "SAPI.SpVoice default voice";
+
+            systemError = systemError + " | default System.Speech: " + fallbackSystemError;
+            sapiError = sapiError + " | default SAPI.SpVoice: " + fallbackSapiError;
+        }
+
+        throw new InvalidOperationException("System.Speech: " + systemError + " | SAPI.SpVoice: " + sapiError);
+    }
+
+    private static WidgetSettings SpeechSettingsWithoutVoice(WidgetSettings settings)
+    {
+        var fallback = WidgetSettings.Default();
+        fallback.SpeakDonation = true;
+        fallback.SpeechVoice = "";
+        fallback.SpeechRate = settings.SpeechRate;
+        fallback.SpeechPitch = settings.SpeechPitch;
+        fallback.SpeechVolume = settings.SpeechVolume;
+        return fallback;
+    }
+
+    private bool TrySpeakWithSystemSpeech(string text, WidgetSettings settings, out string error)
+    {
+        error = "";
+        Type synthType = SpeechSynthesizerType();
         if (synthType == null)
-            throw new InvalidOperationException("System.Speech is not available.");
+        {
+            error = "System.Speech is not available.";
+            return false;
+        }
 
         object synthesizer = Activator.CreateInstance(synthType);
         try
@@ -5690,8 +5773,15 @@ public class DonConnectWidgetServer
             string voice = (settings.SpeechVoice ?? "").Trim();
             if (!string.IsNullOrWhiteSpace(voice))
             {
-                try { synthType.GetMethod("SelectVoice", new[] { typeof(string) }).Invoke(synthesizer, new object[] { voice }); }
-                catch { }
+                try
+                {
+                    synthType.GetMethod("SelectVoice", new[] { typeof(string) }).Invoke(synthesizer, new object[] { voice });
+                }
+                catch (Exception ex)
+                {
+                    error = "Voice not found in System.Speech: " + voice + ". " + UnwrapException(ex).Message;
+                    return false;
+                }
             }
 
             var rateProperty = synthType.GetProperty("Rate");
@@ -5703,6 +5793,12 @@ public class DonConnectWidgetServer
                 volumeProperty.SetValue(synthesizer, Math.Max(0, Math.Min(100, settings.SpeechVolume)), null);
 
             synthType.GetMethod("Speak", new[] { typeof(string) }).Invoke(synthesizer, new object[] { text });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = UnwrapException(ex).Message;
+            return false;
         }
         finally
         {
@@ -5710,6 +5806,144 @@ public class DonConnectWidgetServer
             if (disposable != null)
                 disposable.Dispose();
         }
+    }
+
+    private Type SpeechSynthesizerType()
+    {
+        Type synthType = Type.GetType("System.Speech.Synthesis.SpeechSynthesizer, System.Speech");
+        if (synthType != null)
+            return synthType;
+
+        try
+        {
+            var assembly = System.Reflection.Assembly.LoadWithPartialName("System.Speech");
+            return assembly == null ? null : assembly.GetType("System.Speech.Synthesis.SpeechSynthesizer");
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool TrySpeakWithSapiVoice(string text, WidgetSettings settings, out string error)
+    {
+        error = "";
+        Type sapiType = Type.GetTypeFromProgID("SAPI.SpVoice");
+        if (sapiType == null)
+        {
+            error = "SAPI.SpVoice is not available.";
+            return false;
+        }
+
+        object speaker = null;
+        object selectedVoice = null;
+        try
+        {
+            speaker = Activator.CreateInstance(sapiType);
+            string voice = (settings.SpeechVoice ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(voice))
+            {
+                selectedVoice = FindSapiVoice(speaker, voice);
+                if (selectedVoice == null)
+                {
+                    error = "Voice not found in SAPI: " + voice;
+                    return false;
+                }
+
+                sapiType.InvokeMember("Voice", System.Reflection.BindingFlags.SetProperty, null, speaker, new object[] { selectedVoice });
+            }
+
+            sapiType.InvokeMember("Rate", System.Reflection.BindingFlags.SetProperty, null, speaker, new object[] { SpeechRateToWindows(settings.SpeechRate) });
+            sapiType.InvokeMember("Volume", System.Reflection.BindingFlags.SetProperty, null, speaker, new object[] { Math.Max(0, Math.Min(100, settings.SpeechVolume)) });
+            sapiType.InvokeMember("Speak", System.Reflection.BindingFlags.InvokeMethod, null, speaker, new object[] { text, 0 });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = UnwrapException(ex).Message;
+            return false;
+        }
+        finally
+        {
+            ReleaseComObject(selectedVoice);
+            ReleaseComObject(speaker);
+        }
+    }
+
+    private object FindSapiVoice(object speaker, string requestedVoice)
+    {
+        object voices = null;
+        try
+        {
+            voices = speaker.GetType().InvokeMember("GetVoices", System.Reflection.BindingFlags.InvokeMethod, null, speaker, null);
+            int count = Convert.ToInt32(voices.GetType().InvokeMember("Count", System.Reflection.BindingFlags.GetProperty, null, voices, null), CultureInfo.InvariantCulture);
+            string requested = requestedVoice.Trim().ToLowerInvariant();
+            for (int index = 0; index < count; index++)
+            {
+                object voice = GetComCollectionItem(voices, index);
+                string description = SapiVoiceDescription(voice);
+                string normalized = description.Trim().ToLowerInvariant();
+                if (normalized == requested || normalized.StartsWith(requested + " -", StringComparison.OrdinalIgnoreCase) || requested.StartsWith(normalized + " -", StringComparison.OrdinalIgnoreCase))
+                    return voice;
+
+                ReleaseComObject(voice);
+            }
+        }
+        catch
+        {
+        }
+        finally
+        {
+            ReleaseComObject(voices);
+        }
+
+        return null;
+    }
+
+    private static object GetComCollectionItem(object collection, int index)
+    {
+        try
+        {
+            return collection.GetType().InvokeMember("Item", System.Reflection.BindingFlags.InvokeMethod, null, collection, new object[] { index });
+        }
+        catch
+        {
+            return collection.GetType().InvokeMember("Item", System.Reflection.BindingFlags.GetProperty, null, collection, new object[] { index });
+        }
+    }
+
+    private static string SapiVoiceDescription(object voice)
+    {
+        if (voice == null)
+            return "";
+
+        try
+        {
+            object value = voice.GetType().InvokeMember("GetDescription", System.Reflection.BindingFlags.InvokeMethod, null, voice, null);
+            return value == null ? "" : value.ToString();
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    private static void ReleaseComObject(object value)
+    {
+        try
+        {
+            if (value != null && System.Runtime.InteropServices.Marshal.IsComObject(value))
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(value);
+        }
+        catch
+        {
+        }
+    }
+
+    private static Exception UnwrapException(Exception ex)
+    {
+        var invocation = ex as System.Reflection.TargetInvocationException;
+        return invocation != null && invocation.InnerException != null ? invocation.InnerException : ex;
     }
 
     private static int SpeechRateToWindows(double rate)
@@ -5721,9 +5955,17 @@ public class DonConnectWidgetServer
     private JArray WindowsSpeechVoices()
     {
         var voices = new JArray();
-        Type synthType = Type.GetType("System.Speech.Synthesis.SpeechSynthesizer, System.Speech");
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddSystemSpeechVoices(voices, seen);
+        AddSapiVoices(voices, seen);
+        return voices;
+    }
+
+    private void AddSystemSpeechVoices(JArray voices, HashSet<string> seen)
+    {
+        Type synthType = SpeechSynthesizerType();
         if (synthType == null)
-            return voices;
+            return;
 
         object synthesizer = Activator.CreateInstance(synthType);
         try
@@ -5731,7 +5973,7 @@ public class DonConnectWidgetServer
             object installedVoices = synthType.GetMethod("GetInstalledVoices", Type.EmptyTypes).Invoke(synthesizer, null);
             var enumerable = installedVoices as System.Collections.IEnumerable;
             if (enumerable == null)
-                return voices;
+                return;
 
             foreach (object voice in enumerable)
             {
@@ -5745,11 +5987,7 @@ public class DonConnectWidgetServer
                 if (string.IsNullOrWhiteSpace(name))
                     continue;
 
-                var item = new JObject();
-                item["name"] = name;
-                item["lang"] = culture;
-                item["source"] = "windows";
-                voices.Add(item);
+                AddVoiceItem(voices, seen, name, culture, "System.Speech");
             }
         }
         catch (Exception ex)
@@ -5762,8 +6000,59 @@ public class DonConnectWidgetServer
             if (disposable != null)
                 disposable.Dispose();
         }
+    }
 
-        return voices;
+    private void AddSapiVoices(JArray voices, HashSet<string> seen)
+    {
+        Type sapiType = Type.GetTypeFromProgID("SAPI.SpVoice");
+        if (sapiType == null)
+            return;
+
+        object speaker = null;
+        object collection = null;
+        try
+        {
+            speaker = Activator.CreateInstance(sapiType);
+            collection = sapiType.InvokeMember("GetVoices", System.Reflection.BindingFlags.InvokeMethod, null, speaker, null);
+            int count = Convert.ToInt32(collection.GetType().InvokeMember("Count", System.Reflection.BindingFlags.GetProperty, null, collection, null), CultureInfo.InvariantCulture);
+            for (int index = 0; index < count; index++)
+            {
+                object voice = null;
+                try
+                {
+                    voice = GetComCollectionItem(collection, index);
+                    string description = SapiVoiceDescription(voice);
+                    if (!string.IsNullOrWhiteSpace(description))
+                        AddVoiceItem(voices, seen, description, "", "SAPI.SpVoice");
+                }
+                finally
+                {
+                    ReleaseComObject(voice);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug("SAPI speech voice list is unavailable. " + ex.Message);
+        }
+        finally
+        {
+            ReleaseComObject(collection);
+            ReleaseComObject(speaker);
+        }
+    }
+
+    private static void AddVoiceItem(JArray voices, HashSet<string> seen, string name, string language, string source)
+    {
+        string text = (name ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(text) || !seen.Add(text))
+            return;
+
+        var item = new JObject();
+        item["name"] = text;
+        item["lang"] = language ?? "";
+        item["source"] = source ?? "";
+        voices.Add(item);
     }
 
     private async Task AcceptLoop(CancellationToken token)
@@ -6152,11 +6441,7 @@ public class DonConnectWidgetServer
         donation["currency"] = "RUB";
         donation["provider"] = "Voice test";
         donation["message"] = "This is a donation voice test.";
-        SpeakDonationIfEnabled(donation, settings);
-
-        var result = new JObject();
-        result["ok"] = true;
-        WriteJson(stream, result);
+        WriteJson(stream, SpeakDonationResult(donation, settings, true));
     }
 
     private void ResetGoalEndpoint(NetworkStream stream)
@@ -8399,9 +8684,9 @@ public class DonConnectWidgetServer
     Object.assign(i18n.en, { recommendedObsSize:'Recommended OBS Browser Source size: ', mediaDrop:'Drop PNG/JPG/GIF/MP4/WebM/MP3/WAV here or click', noVisual:'No visual', noSound:'No sound', noTextSound:'No text sound', previewFile:'Preview', builtIn:'built-in', name:'Name', saveRow:'Save row', deleteRow:'Delete row', timerNote:'Example: amount 100 and seconds 3600 means 100 RUB = 60 min.', servicesNote:'Only enabled providers are shown. Clear a checkbox to hide a provider from Goal.', creditsNote:'Streamer.bot HTTP Server must be enabled on 127.0.0.1:7474. DonConnect falls back to local examples if it is unavailable.', leaderboardNote:'Add a custom row or edit names from received donations. Deleting a row automatically moves the next place up.', filterNote:'One item per line. The filter changes browser widgets only and keeps original Streamer.bot donation variables untouched.', aboveText:'Above text', belowText:'Below text', leftText:'Left of text', rightText:'Right of text', behindText:'Behind text', contain:'Contain', cover:'Cover', countdownMode:'Countdown: donations add time', countupMode:'Count up: reset to zero on event' });
     Object.assign(i18n.ru, { recommendedObsSize:'Рекомендуемый размер Browser Source в OBS: ', mediaDrop:'Перетащите PNG/JPG/GIF/MP4/WebM/MP3/WAV сюда или нажмите', noVisual:'Без визуала', noSound:'Без звука', noTextSound:'Без звука текста', previewFile:'Просмотр', builtIn:'встроенный', name:'Имя', saveRow:'Сохранить строку', deleteRow:'Удалить строку', timerNote:'Пример: сумма 100 и 3600 секунд означают 100 RUB = 60 мин.', servicesNote:'Показываются только включенные площадки. Снимите галочку, чтобы скрыть площадку из цели.', creditsNote:'В Streamer.bot должен быть включен HTTP Server на 127.0.0.1:7474. Если он недоступен, DonConnect покажет локальные примеры.', leaderboardNote:'Добавьте строку вручную или исправьте имя из полученного доната. После удаления строки следующее место поднимется автоматически.', filterNote:'Один ник или слово на строку. Фильтр меняет только браузерные виджеты и сохраняет исходные переменные доната Streamer.bot.', aboveText:'Над текстом', belowText:'Под текстом', leftText:'Слева от текста', rightText:'Справа от текста', behindText:'За текстом', contain:'Вписать', cover:'Заполнить', countdownMode:'Обратный отсчет: донаты добавляют время', countupMode:'Отсчет вперед: событие сбрасывает таймер до нуля' });
     Object.assign(i18n.uk, { recommendedObsSize:'Рекомендований розмір Browser Source в OBS: ', mediaDrop:'Перетягніть PNG/JPG/GIF/MP4/WebM/MP3/WAV сюди або натисніть', noVisual:'Без візуалу', noSound:'Без звуку', noTextSound:'Без звуку тексту', previewFile:'Перегляд', builtIn:'вбудований', name:'Імʼя', saveRow:'Зберегти рядок', deleteRow:'Видалити рядок', timerNote:'Приклад: сума 100 і 3600 секунд означають 100 RUB = 60 хв.', servicesNote:'Показуються лише увімкнені платформи. Зніміть позначку, щоб приховати платформу з цілі.', creditsNote:'У Streamer.bot має бути увімкнений HTTP Server на 127.0.0.1:7474. Якщо він недоступний, DonConnect покаже локальні приклади.', leaderboardNote:'Додайте рядок вручну або виправте імʼя з отриманого донату. Після видалення рядка наступне місце підніметься автоматично.', filterNote:'Один нік або слово на рядок. Фільтр змінює лише браузерні віджети та зберігає початкові змінні донату Streamer.bot.', aboveText:'Над текстом', belowText:'Під текстом', leftText:'Ліворуч від тексту', rightText:'Праворуч від тексту', behindText:'За текстом', contain:'Вписати', cover:'Заповнити', countdownMode:'Зворотний відлік: донати додають час', countupMode:'Відлік уперед: подія скидає таймер до нуля' });
-    Object.assign(i18n.en, { history:'Repeats', recentDonationsTitle:'Recent donations', noRecentDonations:'No recent donations yet', replay:'Replay', addFont:'Add font', customFontPlaceholder:'Installed font name', fontAdded:'Font added to the selectors', timerCustomTest:'Timer custom test', sendTimerTest:'Send timer test', creditsSections:'Credits sections', transparentBackground:'Transparent background', pauseCredits:'Pause credits preview', resumeCredits:'Resume credits preview', restartCredits:'Restart credits preview', hiddenSectionNote:'Clear a checkbox to hide a section from Streamer.bot Credits.', filterTestDonation:'Blocked test donation', sendFilterTest:'Send blocked test', donationVoice:'Donation voice', testSpeech:'Test voice', speechHint:'Windows reads donation text from DonConnect itself. Pick a voice, enable reading, then press Test voice.', speechTestStarted:'Voice test started', speakDonation:'Read donation text aloud', speechVoice:'Voice', speechRate:'Voice speed', speechPitch:'Voice pitch', speechVolume:'Voice volume', defaultVoice:'Default Windows voice', lastTenOnly:'Only the latest 10 rows are shown here.' });
-    Object.assign(i18n.ru, { history:'Повторы', recentDonationsTitle:'Последние донаты', noRecentDonations:'Последних донатов пока нет', replay:'Повторить', addFont:'Добавить шрифт', customFontPlaceholder:'Название установленного шрифта', fontAdded:'Шрифт добавлен в списки выбора', timerCustomTest:'Кастомный тест таймера', sendTimerTest:'Отправить тест таймера', creditsSections:'Секции титров', transparentBackground:'Прозрачный фон', pauseCredits:'Пауза титров', resumeCredits:'Продолжить титры', restartCredits:'Перезапустить титры', hiddenSectionNote:'Снимите галочку, чтобы скрыть секцию из титров Streamer.bot.', filterTestDonation:'Кастомный тест запрета', sendFilterTest:'Отправить тест запрета', donationVoice:'Озвучка доната', testSpeech:'Проверить голос', speechHint:'Текст доната зачитывается голосом Windows прямо из DonConnect. Выбери голос, включи озвучку и нажми проверку.', speechTestStarted:'Проверка голоса запущена', speakDonation:'Зачитывать текст доната', speechVoice:'Голос', speechRate:'Скорость голоса', speechPitch:'Тон голоса', speechVolume:'Громкость голоса', defaultVoice:'Голос Windows по умолчанию', lastTenOnly:'Здесь показываются только последние 10 строк.' });
-    Object.assign(i18n.uk, { history:'Повтори', recentDonationsTitle:'Останні донати', noRecentDonations:'Останніх донатів поки немає', replay:'Повторити', addFont:'Додати шрифт', customFontPlaceholder:'Назва встановленого шрифту', fontAdded:'Шрифт додано до списків вибору', timerCustomTest:'Власний тест таймера', sendTimerTest:'Надіслати тест таймера', creditsSections:'Секції титрів', transparentBackground:'Прозорий фон', pauseCredits:'Пауза титрів', resumeCredits:'Продовжити титри', restartCredits:'Перезапустити титри', hiddenSectionNote:'Зніміть позначку, щоб приховати секцію з титрів Streamer.bot.', filterTestDonation:'Власний тест заборони', sendFilterTest:'Надіслати тест заборони', donationVoice:'Озвучення донату', testSpeech:'Перевірити голос', speechHint:'Текст донату читається голосом Windows прямо з DonConnect. Обери голос, увімкни озвучення і натисни перевірку.', speechTestStarted:'Перевірку голосу запущено', speakDonation:'Зачитувати текст донату', speechVoice:'Голос', speechRate:'Швидкість голосу', speechPitch:'Тон голосу', speechVolume:'Гучність голосу', defaultVoice:'Голос Windows за замовчуванням', lastTenOnly:'Тут показуються лише останні 10 рядків.' });
+    Object.assign(i18n.en, { history:'Repeats', recentDonationsTitle:'Recent donations', noRecentDonations:'No recent donations yet', replay:'Replay', addFont:'Add font', customFontPlaceholder:'Installed font name', fontAdded:'Font added to the selectors', timerCustomTest:'Timer custom test', sendTimerTest:'Send timer test', creditsSections:'Credits sections', transparentBackground:'Transparent background', pauseCredits:'Pause credits preview', resumeCredits:'Resume credits preview', restartCredits:'Restart credits preview', hiddenSectionNote:'Clear a checkbox to hide a section from Streamer.bot Credits.', filterTestDonation:'Blocked test donation', sendFilterTest:'Send blocked test', donationVoice:'Donation voice', testSpeech:'Test voice', speechHint:'Windows reads donation text from DonConnect itself. Pick a voice, enable reading, then press Test voice.', speechTestStarted:'Voice test finished', speechTestFailed:'Voice test failed', speakDonation:'Read donation text aloud', speechVoice:'Voice', speechRate:'Voice speed', speechPitch:'Voice pitch', speechVolume:'Voice volume', defaultVoice:'Default Windows voice', lastTenOnly:'Only the latest 10 rows are shown here.' });
+    Object.assign(i18n.ru, { history:'Повторы', recentDonationsTitle:'Последние донаты', noRecentDonations:'Последних донатов пока нет', replay:'Повторить', addFont:'Добавить шрифт', customFontPlaceholder:'Название установленного шрифта', fontAdded:'Шрифт добавлен в списки выбора', timerCustomTest:'Кастомный тест таймера', sendTimerTest:'Отправить тест таймера', creditsSections:'Секции титров', transparentBackground:'Прозрачный фон', pauseCredits:'Пауза титров', resumeCredits:'Продолжить титры', restartCredits:'Перезапустить титры', hiddenSectionNote:'Снимите галочку, чтобы скрыть секцию из титров Streamer.bot.', filterTestDonation:'Кастомный тест запрета', sendFilterTest:'Отправить тест запрета', donationVoice:'Озвучка доната', testSpeech:'Проверить голос', speechHint:'Текст доната зачитывается голосом Windows прямо из DonConnect. Выбери голос, включи озвучку и нажми проверку.', speechTestStarted:'Проверка голоса выполнена', speechTestFailed:'Проверка голоса не сработала', speakDonation:'Зачитывать текст доната', speechVoice:'Голос', speechRate:'Скорость голоса', speechPitch:'Тон голоса', speechVolume:'Громкость голоса', defaultVoice:'Голос Windows по умолчанию', lastTenOnly:'Здесь показываются только последние 10 строк.' });
+    Object.assign(i18n.uk, { history:'Повтори', recentDonationsTitle:'Останні донати', noRecentDonations:'Останніх донатів поки немає', replay:'Повторити', addFont:'Додати шрифт', customFontPlaceholder:'Назва встановленого шрифту', fontAdded:'Шрифт додано до списків вибору', timerCustomTest:'Власний тест таймера', sendTimerTest:'Надіслати тест таймера', creditsSections:'Секції титрів', transparentBackground:'Прозорий фон', pauseCredits:'Пауза титрів', resumeCredits:'Продовжити титри', restartCredits:'Перезапустити титри', hiddenSectionNote:'Зніміть позначку, щоб приховати секцію з титрів Streamer.bot.', filterTestDonation:'Власний тест заборони', sendFilterTest:'Надіслати тест заборони', donationVoice:'Озвучення донату', testSpeech:'Перевірити голос', speechHint:'Текст донату читається голосом Windows прямо з DonConnect. Обери голос, увімкни озвучення і натисни перевірку.', speechTestStarted:'Перевірку голосу виконано', speechTestFailed:'Перевірка голосу не спрацювала', speakDonation:'Зачитувати текст донату', speechVoice:'Голос', speechRate:'Швидкість голосу', speechPitch:'Тон голосу', speechVolume:'Гучність голосу', defaultVoice:'Голос Windows за замовчуванням', lastTenOnly:'Тут показуються лише останні 10 рядків.' });
     Object.assign(i18n.en, { donationAmountStep:'Amount that gives one time step', secondsPerStep:'Seconds added for that amount' });
     Object.assign(i18n.ru, { donationAmountStep:'Сумма, за которую добавляется шаг времени', secondsPerStep:'Сколько секунд добавить за эту сумму' });
     Object.assign(i18n.uk, { donationAmountStep:'Сума, за яку додається крок часу', secondsPerStep:'Скільки секунд додати за цю суму' });
@@ -8499,8 +8784,8 @@ public class DonConnectWidgetServer
     let statusTimer = null;
     function populateFontList() { fonts = normalizeFontCatalog(fonts); const selects = Array.from(document.querySelectorAll('[data-font-select]')); if (!selects.length) return; const windows = uniqueFonts(fonts.windows || []); const google = uniqueFonts(fonts.google || []); const options = '<option value="""">' + t('defaultFont') + '</option>' + fontGroup('Windows', windows) + fontGroup('Google Fonts', google); selects.forEach(select => { const value = select.value; select.innerHTML = options; ensureFontOption(select, value); select.value = value || ''; }); hideBaseFontRows(); }
     function hideBaseFontRows() { ['[data-donation=FontFamily]','[data-overlay=FontFamily]','[data-credits=FontFamily]','[data-leaderboard=FontFamily]'].forEach(selector => document.querySelectorAll(selector).forEach(input => { const label = input.closest('label'); if (label) label.style.display = 'none'; })); }
-    function populateSpeechVoices() { const select = document.getElementById('speechVoiceSelect'); if (!select) return; const selected = donation.SpeechVoice || select.value || ''; const server = Array.isArray(speechVoices && speechVoices.items) ? speechVoices.items : []; const browser = window.speechSynthesis ? window.speechSynthesis.getVoices().map(voice => ({ name:voice.name, lang:voice.lang, source:'browser' })) : []; const seen = new Set(); const all = [...server, ...browser].filter(voice => { const name = String(voice && voice.name || '').trim(); const key = name.toLowerCase(); if (!name || seen.has(key)) return false; seen.add(key); return true; }); select.innerHTML = '<option value="""">' + escapeHtml(t('defaultVoice')) + '</option>' + all.map(voice => '<option value=""' + escapeAttr(voice.name) + '"">' + escapeHtml(voice.name + (voice.lang ? ' - ' + voice.lang : '') + (voice.source ? ' (' + voice.source + ')' : '')) + '</option>').join(''); ensureFontOption(select, selected); select.value = selected || ''; }
-    async function testSpeech() { donation.SpeakDonation = true; sync('[data-donation=SpeakDonation]', true); await post('/donconnect/api/speech-test', donation); showStatus(t('speechTestStarted')); }
+    function populateSpeechVoices() { const select = document.getElementById('speechVoiceSelect'); if (!select) return; const selected = donation.SpeechVoice || select.value || ''; const server = Array.isArray(speechVoices && speechVoices.items) ? speechVoices.items : []; const seen = new Set(); const all = server.filter(voice => { const name = String(voice && voice.name || '').trim(); const key = name.toLowerCase(); if (!name || seen.has(key)) return false; seen.add(key); return true; }); select.innerHTML = '<option value="""">' + escapeHtml(t('defaultVoice')) + '</option>' + all.map(voice => '<option value=""' + escapeAttr(voice.name) + '"">' + escapeHtml(voice.name + (voice.lang ? ' - ' + voice.lang : '') + (voice.source ? ' (' + voice.source + ')' : '')) + '</option>').join(''); ensureFontOption(select, selected); select.value = selected || ''; }
+    async function testSpeech() { donation.SpeakDonation = true; sync('[data-donation=SpeakDonation]', true); const result = await post('/donconnect/api/speech-test', donation); if (result && result.ok) showStatus(t('speechTestStarted') + (result.engine ? ' (' + result.engine + ')' : '')); else showStatus(t('speechTestFailed') + ': ' + ((result && result.error) || 'unknown')); }
     function normalizeFontCatalog(source) { return { windows: uniqueFonts([...(fallbackFonts.windows || []), ...fontArray(source && source.windows)]), google: uniqueFonts([...(fallbackFonts.google || []), ...fontArray(source && source.google)]) }; }
     function fontArray(value) { if (Array.isArray(value)) return value; if (!value) return []; return [value]; }
     function cloneFontCatalog(source) { return { windows:[...((source && source.windows) || [])], google:[...((source && source.google) || [])] }; }

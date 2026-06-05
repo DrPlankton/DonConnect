@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1-beta.2.2 - DonConnect Beta 2 Hotfix 2
+
+- Fixed donation alert text-to-speech by loading `System.Speech` correctly and adding a Windows SAPI fallback.
+- The voice test button now returns a real result and shows the speech engine or error.
+- The editor now lists server-side Windows voices that DonConnect can actually use.
+- If an old saved voice is unavailable, DonConnect falls back to the default Windows voice instead of staying silent.
+
 ## 0.12.1-beta.2.1 - DonConnect Beta 2 Hotfix 1
 
 - Fixed donation text-to-speech by using Windows voices from DonConnect itself.
