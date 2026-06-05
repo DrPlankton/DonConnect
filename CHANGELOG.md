@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.1-beta.2.4 - DonConnect Beta 2 Hotfix 4
+
+- Fixed severe Credits widget stuttering caused by blocking Streamer.bot HTTP requests and repeated full DOM rebuilds.
+- DonConnect now reads the local Streamer.bot `data/credits.cache` first and uses short background HTTP requests only as a fallback.
+- Restored the complete Streamer.bot Credits section list, including empty sections, roles, Hype Train, Bits, rewards, groups, and custom sections.
+- Fixed Credits section checkboxes returning to their previous state after saving or reloading.
+- Saving Credits settings no longer forcibly restarts the rolling animation.
+
 ## 0.12.1-beta.2.3 - DonConnect Beta 2 Hotfix 3
 
 - Added separate donation voice toggles for donor name, amount, platform, and message.

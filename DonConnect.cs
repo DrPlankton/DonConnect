@@ -16,7 +16,7 @@ public class CPHInline
 {
     private static DonationBridgeRuntime Runtime;
     private static readonly object GlobalDedupeLock = new object();
-    private const string CurrentVersion = "0.12.1-beta.2.3";
+    private const string CurrentVersion = "0.12.1-beta.2.4";
     private const string UpdateFeedUrl = "https://raw.githubusercontent.com/DrPlankton/DonConnect/main/version.json";
     private const string BundledDonationAlertsClientId = "18717";
     private const string BundledDonationAlertsClientSecret = "XxOAjz0FeUQlzNWjmWwzxZGpeGb57hSEt0dZskB6";
@@ -5513,7 +5513,7 @@ public class DonConnectWidgetServer
 {
     private const string Host = "127.0.0.1";
     private const int DefaultPort = 3987;
-    private const string EditorVersion = "0.12.1-beta.2.3";
+    private const string EditorVersion = "0.12.1-beta.2.4";
     private const int MaxHttpBodyBytes = 48 * 1024 * 1024;
     private const int MaxAlertMediaBytes = 32 * 1024 * 1024;
     private readonly BridgeSettings BridgeSettings;
@@ -5521,6 +5521,7 @@ public class DonConnectWidgetServer
     private readonly Action<UnifiedDonationEvent> DonationHandler;
     private readonly object StateLock = new object();
     private readonly object SpeechLock = new object();
+    private readonly object NativeCreditsLock = new object();
     private TcpListener Listener;
     private CancellationTokenSource Cancellation;
     private WidgetSettings CurrentSettings;
@@ -5536,6 +5537,11 @@ public class DonConnectWidgetServer
     private int CreditsEventId;
     private int LeaderboardEventId;
     private int Port;
+    private JObject NativeCreditsCache;
+    private string NativeCreditsCachePath = "";
+    private DateTime NativeCreditsCacheWriteUtc = DateTime.MinValue;
+    private DateTime NativeCreditsLastHttpAttemptUtc = DateTime.MinValue;
+    private int NativeCreditsHttpRefreshPending;
 
     public DonConnectWidgetServer(BridgeSettings settings, BridgeLogger logger, Action<UnifiedDonationEvent> donationHandler)
     {
@@ -6564,13 +6570,14 @@ public class DonConnectWidgetServer
 
     private void CreditsStateEndpoint(NetworkStream stream)
     {
-        JObject nativeCredits = TryLoadNativeCredits(false);
+        JObject nativeCredits = TryLoadNativeCredits();
         if (JsonBool(CreditsSettings, "UseNativeCredits", true) && nativeCredits != null)
         {
             var nativeResult = new JObject();
             nativeResult["eventId"] = CreditsEventId;
             nativeResult["source"] = "streamerbot";
             nativeResult["native"] = nativeCredits;
+            nativeResult["sections"] = CreditsSectionCatalog(nativeCredits);
             WriteJson(stream, nativeResult);
             return;
         }
@@ -6590,35 +6597,246 @@ public class DonConnectWidgetServer
 
         result["items"] = items;
         result["source"] = "donconnect";
+        result["sections"] = CreditsSectionCatalog(null);
         WriteJson(stream, result);
     }
 
     private void CreditsTestEndpoint(NetworkStream stream)
     {
         JObject result = new JObject();
-        result["ok"] = TryLoadNativeCredits(true) != null;
-        result["message"] = JsonBool(result, "ok", false) ? "Streamer.bot test credits loaded." : "Streamer.bot HTTP Server is unavailable. Local preview samples are still enabled.";
+        bool requested = RequestNativeCreditsFromHttp(true, 1500) != null;
+        JObject nativeCredits = TryLoadNativeCredits();
+        result["ok"] = requested || nativeCredits != null;
+        result["message"] = requested
+            ? "Streamer.bot test credits loaded."
+            : nativeCredits != null
+                ? "Streamer.bot HTTP test did not answer, current Credits cache is used."
+                : "Streamer.bot Credits are unavailable. Local preview samples are still enabled.";
         WriteJson(stream, result);
     }
 
-    private JObject TryLoadNativeCredits(bool test)
+    private JObject TryLoadNativeCredits()
+    {
+        JObject local = TryLoadNativeCreditsCacheFile();
+        if (local != null)
+            return local;
+
+        JObject cached = CloneNativeCreditsCache();
+        if (cached != null)
+        {
+            QueueNativeCreditsHttpRefresh();
+            return cached;
+        }
+
+        QueueNativeCreditsHttpRefresh();
+        return null;
+    }
+
+    private JObject TryLoadNativeCreditsCacheFile()
+    {
+        foreach (string path in NativeCreditsCachePaths())
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+
+                DateTime writeUtc = File.GetLastWriteTimeUtc(path);
+                lock (NativeCreditsLock)
+                {
+                    if (NativeCreditsCache != null
+                        && path.Equals(NativeCreditsCachePath, StringComparison.OrdinalIgnoreCase)
+                        && writeUtc == NativeCreditsCacheWriteUtc)
+                        return (JObject)NativeCreditsCache.DeepClone();
+                }
+
+                string raw = File.ReadAllText(path, Encoding.UTF8);
+                JObject parsed = string.IsNullOrWhiteSpace(raw) ? null : JObject.Parse(raw);
+                if (parsed == null)
+                    continue;
+
+                lock (NativeCreditsLock)
+                {
+                    NativeCreditsCache = parsed;
+                    NativeCreditsCachePath = path;
+                    NativeCreditsCacheWriteUtc = writeUtc;
+                    CreditsEventId++;
+                    return (JObject)NativeCreditsCache.DeepClone();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug("Streamer.bot Credits cache was not read: " + ex.Message);
+            }
+        }
+
+        return null;
+    }
+
+    private IEnumerable<string> NativeCreditsCachePaths()
+    {
+        var paths = new List<string>();
+        AddUniquePath(paths, Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "credits.cache"));
+        AddUniquePath(paths, Path.Combine(Environment.CurrentDirectory, "data", "credits.cache"));
+
+        string dataDirectory = SettingsDirectory();
+        DirectoryInfo parent = string.IsNullOrWhiteSpace(dataDirectory) ? null : Directory.GetParent(dataDirectory);
+        if (parent != null)
+            AddUniquePath(paths, Path.Combine(parent.FullName, "data", "credits.cache"));
+
+        return paths;
+    }
+
+    private static void AddUniquePath(List<string> paths, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+        foreach (string current in paths)
+            if (current.Equals(path, StringComparison.OrdinalIgnoreCase))
+                return;
+        paths.Add(path);
+    }
+
+    private JObject CloneNativeCreditsCache()
+    {
+        lock (NativeCreditsLock)
+            return NativeCreditsCache == null ? null : (JObject)NativeCreditsCache.DeepClone();
+    }
+
+    private void QueueNativeCreditsHttpRefresh()
+    {
+        lock (NativeCreditsLock)
+        {
+            if (NativeCreditsHttpRefreshPending != 0)
+                return;
+            if ((DateTime.UtcNow - NativeCreditsLastHttpAttemptUtc).TotalSeconds < 3)
+                return;
+            NativeCreditsLastHttpAttemptUtc = DateTime.UtcNow;
+            NativeCreditsHttpRefreshPending = 1;
+        }
+
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try
+            {
+                RequestNativeCreditsFromHttp(false, 700);
+            }
+            finally
+            {
+                lock (NativeCreditsLock)
+                    NativeCreditsHttpRefreshPending = 0;
+            }
+        });
+    }
+
+    private JObject RequestNativeCreditsFromHttp(bool test, int timeoutMs)
     {
         try
         {
             string baseUrl = BridgeSettings.Get("STREAMERBOT_HTTP_URL", "http://127.0.0.1:7474").Trim().TrimEnd('/');
             if (string.IsNullOrWhiteSpace(baseUrl))
                 return null;
-            using (var client = new WebClient())
+
+            var request = (HttpWebRequest)WebRequest.Create(baseUrl + (test ? "/TestCredits" : "/GetCredits"));
+            request.Method = "GET";
+            request.Timeout = Math.Max(250, timeoutMs);
+            request.ReadWriteTimeout = Math.Max(250, timeoutMs);
+            request.KeepAlive = false;
+            request.Proxy = null;
+            using (var response = (HttpWebResponse)request.GetResponse())
+            using (Stream responseStream = response.GetResponseStream())
+            using (var reader = new StreamReader(responseStream, Encoding.UTF8))
             {
-                client.Encoding = Encoding.UTF8;
-                string raw = client.DownloadString(baseUrl + (test ? "/TestCredits" : "/GetCredits"));
-                return string.IsNullOrWhiteSpace(raw) ? null : JObject.Parse(raw);
+                string raw = reader.ReadToEnd();
+                if (string.IsNullOrWhiteSpace(raw))
+                    return test ? new JObject() : null;
+                JObject parsed = JObject.Parse(raw);
+                if (parsed == null)
+                    return null;
+
+                lock (NativeCreditsLock)
+                {
+                    NativeCreditsCache = parsed;
+                    NativeCreditsCachePath = "";
+                    NativeCreditsCacheWriteUtc = DateTime.MinValue;
+                    CreditsEventId++;
+                    return (JObject)NativeCreditsCache.DeepClone();
+                }
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Logger.Debug("Streamer.bot Credits HTTP request did not answer: " + ex.Message);
             return null;
         }
+    }
+
+    private JArray CreditsSectionCatalog(JObject nativeCredits)
+    {
+        var result = new JArray();
+        AddCreditsSection(result, "Follows");
+        AddCreditsSection(result, "Cheers");
+        AddCreditsSection(result, "Subs");
+        AddCreditsSection(result, "ReSubs");
+        AddCreditsSection(result, "Gift Subs");
+        AddCreditsSection(result, "Gift Bombs");
+        AddCreditsSection(result, "Raids");
+        AddCreditsSection(result, "Reward Redemptions");
+        AddCreditsSection(result, "Goal Contributions");
+        AddCreditsSection(result, "Game Updates");
+        AddCreditsSection(result, "Pyramids");
+        AddCreditsSection(result, "Hype Trains");
+        AddCreditsSection(result, "Hype Train Conductors");
+        AddCreditsSection(result, "Hype Train Contributors");
+        AddCreditsSection(result, "Editors");
+        AddCreditsSection(result, "Moderators");
+        AddCreditsSection(result, "Subscribers");
+        AddCreditsSection(result, "VIPs");
+        AddCreditsSection(result, "Users");
+        AddCreditsSection(result, "Groups");
+        AddCreditsSection(result, "All Bits");
+        AddCreditsSection(result, "Month Bits");
+        AddCreditsSection(result, "Week Bits");
+        AddCreditsSection(result, "Channel Rewards");
+        AddCreditsSection(result, JsonText(CreditsSettings, "SectionTitle", "Donations"));
+        AddDynamicCreditsSections(result, nativeCredits == null ? null : nativeCredits["custom"] ?? nativeCredits["Custom"]);
+        AddDynamicCreditsSections(result, nativeCredits == null ? null : nativeCredits["groups"] ?? nativeCredits["Groups"]);
+        return result;
+    }
+
+    private static void AddDynamicCreditsSections(JArray result, JToken token)
+    {
+        JObject source = token as JObject;
+        if (source == null)
+            return;
+        foreach (JProperty property in source.Properties())
+            AddCreditsSection(result, PrettyCreditsTitle(property.Name));
+    }
+
+    private static void AddCreditsSection(JArray result, string title)
+    {
+        title = (title ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(title))
+            return;
+        foreach (JToken item in result)
+            if (item.ToString().Equals(title, StringComparison.OrdinalIgnoreCase))
+                return;
+        result.Add(title);
+    }
+
+    private static string PrettyCreditsTitle(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "Credits";
+        var builder = new StringBuilder();
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value[index];
+            if (index > 0 && char.IsUpper(current) && char.IsLower(value[index - 1]))
+                builder.Append(' ');
+            builder.Append(current);
+        }
+        return builder.ToString();
     }
 
     private void LeaderboardStateEndpoint(NetworkStream stream)
@@ -8660,6 +8878,7 @@ public class DonConnectWidgetServer
     let lang = 'en';
     const fallbackFonts = { windows:['Segoe UI','Arial','Calibri','Verdana','Tahoma','Trebuchet MS','Georgia','Times New Roman','Consolas','Courier New','Impact','Comic Sans MS'], google:[] };
     let donation = {}; let overlay = {}; let credits = {}; let leaderboard = {}; let contentFilter = {}; let fonts = cloneFontCatalog(fallbackFonts); let speechVoices = { items:[] }; let alertMedia = { items:[], directory:'', maxUploadBytes:33554432 };
+    let creditsSectionCatalog = []; let creditsSectionLoadId = 0;
     const urls = { donation:'/donconnect/widget', history:'/donconnect/dock', goal:'/donconnect/goal', timer:'/donconnect/timer', credits:'/donconnect/credits', leaderboard:'/donconnect/leaderboard', filter:'/donconnect/widget' };
     const serviceNames = ['DonationAlerts','StreamElements','Streamlabs','DonatePay RU','DonatePay EU','Donate.Stream','deStream','DonateX.gg','ODA','Generic API'];
     const donationDefaults = { Width:680, Height:360, BorderRadius:18, Padding:26, FontSize:28, Opacity:.88, BackgroundColor:'#10131a', TextColor:'#f8fbff', AccentColor:'#35d07f', AnimationDuration:650, FontFamily:'Segoe UI', DonorFontFamily:'', AmountFontFamily:'', MessageFontFamily:'', PlatformFontFamily:'', DonorTemplate:'{donor}', AmountTemplate:'{amount} {currency}', MessageTemplate:'{message}', PlatformTemplate:'{platform}', ShowBackground:true, ShowProgressBar:false, ShowPlatform:true, DisplayDuration:9000, EntryAnimation:'fade', ExitAnimation:'fade', TextAnimation:'fade', MediaFile:'', SoundFile:'', TextSoundFile:'', MediaFit:'contain', MediaPlacement:'above', MediaWidth:260, MediaHeight:170, MediaX:0, MediaY:0, TextAlign:'center', DonorX:0, DonorY:0, AmountX:0, AmountY:0, MessageX:0, MessageY:0, SoundVolume:75, TextSoundVolume:45, SpeakDonation:false, SpeechReadDonor:true, SpeechReadAmount:true, SpeechReadPlatform:true, SpeechReadMessage:true, SpeechVoice:'', SpeechRate:1, SpeechPitch:1, SpeechVolume:85, VideoMuted:true, AlertRules:[], PresetName:'Minimal Dark', Language:'en' };
@@ -8857,7 +9076,7 @@ public class DonConnectWidgetServer
       setTimeout(sendPreview, 250);
     }
     function update(store, el, name) { const key = el.dataset[name]; store[key] = valueOf(el); sync(`[data-${name}=""${key}""]`, store[key]); sendPreview(); }
-    function fillAll() { renderAlertMediaLibrary(); renderAlertRules(); renderServiceToggles(); populateSpeechVoices(); fill('donation', donation); fill('overlay', overlay); fill('credits', credits); fill('leaderboard', leaderboard); fill('filter', contentFilter); refreshGoalImageName(); loadCreditsSections(); hideBaseFontRows(); }
+    function fillAll() { renderAlertMediaLibrary(); renderAlertRules(); renderServiceToggles(); populateSpeechVoices(); fill('donation', donation); fill('overlay', overlay); fill('credits', credits); fill('leaderboard', leaderboard); fill('filter', contentFilter); refreshGoalImageName(); renderCreditsSections(); hideBaseFontRows(); }
     function fill(name, store) { document.querySelectorAll(`[data-${name}]`).forEach(el => setValue(el, store[el.dataset[name]])); }
     function valueOf(el) { if (el.type === 'checkbox') return el.checked; return el.type === 'range' || el.type === 'number' ? numberValue(el) : el.value; }
     function setValue(el, value) { if (el.type === 'checkbox') el.checked = value === true || value === 'true'; else { if (el.matches && el.matches('[data-font-select]')) ensureFontOption(el, value); el.value = value ?? ''; } }
@@ -8865,7 +9084,7 @@ public class DonConnectWidgetServer
     function numberValue(el) { return el.step && el.step.includes('.') ? Number(el.value) : parseInt(el.value || '0', 10); }
     function sync(selector, value) { document.querySelectorAll(selector).forEach(el => setValue(el, value)); }
     function sendPreview() { const frame = document.getElementById('frame'); if (!frame || !frame.contentWindow) return; if (active === 'donation' || active === 'history' || active === 'filter') frame.contentWindow.postMessage({ type:'settings', settings:donation }, location.origin); if (active === 'goal' || active === 'timer') frame.contentWindow.postMessage({ type:'overlay-settings', settings:overlay }, location.origin); if (active === 'credits') frame.contentWindow.postMessage({ type:'credits-settings', settings:credits }, location.origin); if (active === 'leaderboard') frame.contentWindow.postMessage({ type:'leaderboard-settings', settings:leaderboard }, location.origin); }
-    async function save() { donation.Language = lang; if (active === 'donation' || active === 'history') donation = await post('/donconnect/api/settings', donation); if (active === 'goal' || active === 'timer') overlay = await post('/donconnect/api/overlay-settings', overlay); if (active === 'credits') { credits = await post('/donconnect/api/credits-settings', credits); restartCreditsPreview(); } if (active === 'leaderboard') leaderboard = await post('/donconnect/api/leaderboard-settings', leaderboard); if (active === 'filter') contentFilter = await post('/donconnect/api/content-filter-settings', contentFilter); fillAll(); translate(); sendPreview(); showStatus(t('settingsSaved')); }
+    async function save() { donation.Language = lang; if (active === 'donation' || active === 'history') donation = await post('/donconnect/api/settings', donation); if (active === 'goal' || active === 'timer') overlay = await post('/donconnect/api/overlay-settings', overlay); if (active === 'credits') credits = await post('/donconnect/api/credits-settings', credits); if (active === 'leaderboard') leaderboard = await post('/donconnect/api/leaderboard-settings', leaderboard); if (active === 'filter') contentFilter = await post('/donconnect/api/content-filter-settings', contentFilter); fillAll(); translate(); sendPreview(); showStatus(t('settingsSaved')); }
     async function post(url, data) { const response = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) }); const json = await response.json(); if (!response.ok) throw new Error(json && json.error ? json.error : 'Request failed'); return json; }
     function resetActive() { if (active === 'donation' || active === 'history') donation = Object.assign({}, donationDefaults, { Language:lang }); if (active === 'goal' || active === 'timer') { overlay = Object.assign({}, overlayDefaults); clearOverlayImages(); } if (active === 'credits') { credits = Object.assign({}, creditsDefaults); creditsPaused = false; updateCreditsPauseButton(); restartCreditsPreview(); } if (active === 'leaderboard') leaderboard = Object.assign({}, leaderboardDefaults); if (active === 'filter') contentFilter = Object.assign({}, filterDefaults); fillAll(); translate(); sendPreview(); }
     async function resetAndSave() { resetActive(); await save(); reloadPreview(); }
@@ -8886,8 +9105,10 @@ public class DonConnectWidgetServer
     async function loadRecentDonations() { const box = document.getElementById('recentDonations'); if (!box) return; const result = await fetchJson('/donconnect/api/recent-donations', { items:[] }); const items = Array.isArray(result && result.items) ? result.items : []; if (!items.length) { box.innerHTML = '<p class=""note"">' + escapeHtml(t('noRecentDonations')) + '</p>'; return; } box.innerHTML = items.map(item => `<div class='media-item'><span><b>${escapeHtml(item.donor || 'Anonymous')}</b><small>${escapeHtml([item.amount, item.currency].filter(Boolean).join(' '))} | ${escapeHtml(item.provider || item.source || '')}</small><small>${escapeHtml(item.message || '')}</small></span><div class='media-actions'><button type='button' data-replay-donation='${escapeAttr(item.id || '')}'>${escapeHtml(t('replay'))}</button><button type='button' class='danger' data-delete-recent-donation='${escapeAttr(item.id || '')}'>${escapeHtml(t('deleteDonation'))}</button></div></div>`).join(''); box.querySelectorAll('[data-replay-donation]').forEach(button => button.addEventListener('click', () => replayDonation(button.dataset.replayDonation))); box.querySelectorAll('[data-delete-recent-donation]').forEach(button => button.addEventListener('click', () => deleteRecentDonation(button.dataset.deleteRecentDonation))); }
     async function replayDonation(id) { await post('/donconnect/api/replay-donation', { id }); showStatus(t('testSent')); setTimeout(sendPreview, 300); await loadRecentDonations(); }
     async function deleteRecentDonation(id) { await post('/donconnect/api/delete-recent-donation', { id }); showStatus(t('donationDeleted')); await loadRecentDonations(); setTimeout(sendPreview, 250); }
-    async function loadCreditsSections() { const box = document.getElementById('creditsSectionToggles'); if (!box) return; const state = await fetchJson('/donconnect/api/credits-state', {}); const names = creditSectionNames(state); if (!Array.isArray(credits.HiddenSections)) credits.HiddenSections = []; if (!names.length) { box.innerHTML = '<p class=""note"">' + escapeHtml(t('noRecentDonations')) + '</p>'; return; } box.innerHTML = names.map(name => `<label class='check-row'><input type='checkbox' data-credit-section='${escapeAttr(name)}' ${credits.HiddenSections.includes(name) ? '' : 'checked'}><span>${escapeHtml(name)}</span></label>`).join(''); box.querySelectorAll('[data-credit-section]').forEach(input => input.addEventListener('change', () => { const name = input.dataset.creditSection; credits.HiddenSections = input.checked ? credits.HiddenSections.filter(item => item !== name) : [...new Set([...credits.HiddenSections, name])]; sendPreview(); })); }
-    function creditSectionNames(state) { const names = []; const add = name => { name = String(name || '').trim(); if (name && !names.some(item => item.toLowerCase() === name.toLowerCase())) names.push(name); }; const walk = node => { if (!node || typeof node !== 'object') return; Object.entries(node).forEach(([key, value]) => { if (Array.isArray(value) && value.length) add(prettyTitle(key)); else if (value && typeof value === 'object') walk(value); }); }; if (state && state.native) walk(state.native); if (state && Array.isArray(state.items) && state.items.length) add(credits.SectionTitle || 'Donations'); return names; }
+    async function loadCreditsSections() { const requestId = ++creditsSectionLoadId; const state = await fetchJson('/donconnect/api/credits-state', {}); if (requestId !== creditsSectionLoadId) return; creditsSectionCatalog = creditSectionNames(state); renderCreditsSections(); }
+    function renderCreditsSections() { const box = document.getElementById('creditsSectionToggles'); if (!box) return; const names = creditsSectionCatalog.length ? creditsSectionCatalog : defaultCreditSectionNames(); if (!Array.isArray(credits.HiddenSections)) credits.HiddenSections = []; const hidden = new Set(credits.HiddenSections.map(name => String(name || '').toLowerCase())); box.innerHTML = names.map(name => `<label class='check-row'><input type='checkbox' data-credit-section='${escapeAttr(name)}' ${hidden.has(name.toLowerCase()) ? '' : 'checked'}><span>${escapeHtml(name)}</span></label>`).join(''); box.querySelectorAll('[data-credit-section]').forEach(input => input.addEventListener('change', () => { const name = input.dataset.creditSection; const key = String(name || '').toLowerCase(); const current = Array.isArray(credits.HiddenSections) ? credits.HiddenSections : []; credits.HiddenSections = input.checked ? current.filter(item => String(item || '').toLowerCase() !== key) : [...current.filter(item => String(item || '').toLowerCase() !== key), name]; sendPreview(); })); }
+    function creditSectionNames(state) { const names = []; const add = name => { name = String(name || '').trim(); if (name && !names.some(item => item.toLowerCase() === name.toLowerCase())) names.push(name); }; if (state && Array.isArray(state.sections)) state.sections.forEach(add); defaultCreditSectionNames().forEach(add); return names; }
+    function defaultCreditSectionNames() { return ['Follows','Cheers','Subs','ReSubs','Gift Subs','Gift Bombs','Raids','Reward Redemptions','Goal Contributions','Game Updates','Pyramids','Hype Trains','Hype Train Conductors','Hype Train Contributors','Editors','Moderators','Subscribers','VIPs','Users','Groups','All Bits','Month Bits','Week Bits','Channel Rewards', credits.SectionTitle || 'Donations']; }
     function prettyTitle(value) { return String(value || 'Credits').replace(/([a-z])([A-Z])/g, '$1 $2'); }
     function toggleCreditsPause() { setCreditsPaused(!creditsPaused); }
     function setCreditsPaused(value) { creditsPaused = !!value; updateCreditsPauseButton(); postCreditsControl(creditsPaused ? 'pause' : 'resume'); }
@@ -9059,7 +9280,7 @@ public class DonConnectWidgetServer
       safeRun(renderAlertRules);
       safeRun(loadLeaderboardEntries);
       safeRun(loadRecentDonations);
-      safeRun(loadCreditsSections);
+      safeRun(renderCreditsSections);
       safeRun(populateSpeechVoices);
       safeRun(updateCreditsPauseButton);
       safeRun(hideBaseFontRows);
@@ -9696,15 +9917,19 @@ public class DonConnectWidgetServer
     let settings = null;
     let state = null;
     let paused = false;
+    let polling = false;
+    let lastMarkup = '';
     boot();
     window.addEventListener('message', event => { if (event.data && event.data.type === 'credits-settings') { settings = event.data.settings; applySettings(); render(); } if (event.data && event.data.type === 'credits-control') applyControl(event.data.action); });
-    async function boot() { settings = await fetch('/donconnect/api/credits-settings').then(r => r.json()).catch(() => null); applySettings(); await poll(); setInterval(poll, 1200); }
-    async function poll() { const data = await fetch('/donconnect/api/credits-state', { cache:'no-store' }).then(r => r.json()).catch(() => null); if (!data) return; state = data; render(); }
+    async function boot() { settings = await fetch('/donconnect/api/credits-settings').then(r => r.json()).catch(() => null); applySettings(); await poll(); setInterval(poll, 1500); }
+    async function poll() { if (polling) return; polling = true; try { const data = await fetch('/donconnect/api/credits-state', { cache:'no-store' }).then(r => r.json()).catch(() => null); if (!data) return; state = data; render(); } finally { polling = false; } }
     function applySettings() { if (!settings) return; const root = document.documentElement.style; root.setProperty('--bg', settings.TransparentBackground === false ? (settings.BackgroundColor || '#000000') : 'transparent'); root.setProperty('--text', settings.TextColor || '#f7f4ec'); root.setProperty('--muted', settings.MutedColor || '#b9d8d2'); root.setProperty('--accent', settings.AccentColor || '#ffcf5a'); root.setProperty('--duration', Math.max(5, Number(settings.DurationSeconds || 70)) + 's'); root.setProperty('--w', px(settings.Width || 920)); root.setProperty('--fs', px(settings.FontSize || 42)); root.setProperty('--font', fontStack(settings.FontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--title-font', fontStack(settings.TitleFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--detail-font', fontStack(settings.DetailFontFamily, 'Segoe UI, Arial, sans-serif')); }
-    function render() { let sections = state && state.native ? nativeSections(state.native) : [{ title:(settings && settings.SectionTitle) || 'Donations', items:(state && state.items) || [] }]; sections = sections.filter(group => !hiddenSection(group.title)); const count = sections.reduce((sum, item) => sum + item.items.length, 0); const base = Math.max(5, Number(settings && settings.DurationSeconds || 70)); document.documentElement.style.setProperty('--duration', ((settings && settings.LockDuration) ? Math.max(base, 24 + count * 3) : base) + 's'); const body = sections.length ? sections.map(section).join('') : '<p class=""empty"">No credits yet</p>'; const html = [`<header class=""intro""><h1>${escapeHtml((settings && settings.Title) || 'Thanks for watching')}</h1><p>${escapeHtml((settings && settings.Subtitle) || 'Today with us')}</p></header>`, body, `<footer class=""outro"">${escapeHtml((settings && settings.Outro) || 'See you next stream')}</footer>`].join(''); const el = document.getElementById('credits'); el.innerHTML = html; el.classList.toggle('paused', paused); }
+    function render() { let sections = state && state.native ? nativeSections(state.native) : [{ title:(settings && settings.SectionTitle) || 'Donations', items:(state && state.items) || [] }]; sections = sections.filter(group => !hiddenSection(group.title)); const count = sections.reduce((sum, item) => sum + item.items.length, 0); const base = Math.max(5, Number(settings && settings.DurationSeconds || 70)); document.documentElement.style.setProperty('--duration', ((settings && settings.LockDuration) ? Math.max(base, 24 + count * 3) : base) + 's'); const body = sections.length ? sections.map(section).join('') : '<p class=""empty"">No credits yet</p>'; const html = [`<header class=""intro""><h1>${escapeHtml((settings && settings.Title) || 'Thanks for watching')}</h1><p>${escapeHtml((settings && settings.Subtitle) || 'Today with us')}</p></header>`, body, `<footer class=""outro"">${escapeHtml((settings && settings.Outro) || 'See you next stream')}</footer>`].join(''); const el = document.getElementById('credits'); if (html !== lastMarkup) { el.innerHTML = html; lastMarkup = html; } el.classList.toggle('paused', paused); }
     function section(group) { const items = group.items || []; if (!items.length) return ''; return '<section class=""section""><h2>' + escapeHtml(group.title || 'Credits') + '</h2><ul class=""names"">' + items.map(item => `<li>${escapeHtml(item.name || 'Anonymous')}<span class=""detail"">${escapeHtml(detail(item))}</span></li>`).join('') + '</ul></section>'; }
-    function nativeSections(data) { const result = []; const roots = [data.Events || data.events, data.HypeTrain || data.hypeTrain, data.User || data.Users || data.user || data.users, data.Groups || data.groups, data.Top || data.top, data.Custom || data.custom]; roots.filter(Boolean).forEach(root => walkNative(root, '', result)); return result; }
-    function walkNative(node, prefix, result) { if (!node || typeof node !== 'object') return; Object.entries(node).forEach(([key, value]) => { if (Array.isArray(value)) { const items = value.map(nativeItem).filter(Boolean); if (items.length) result.push({ title:prettyTitle(key), items }); } else if (value && typeof value === 'object') walkNative(value, key, result); }); }
+    function nativeSections(data) { const result = []; const events = data.Events || data.events || {}; const users = data.User || data.Users || data.user || data.users || {}; const hype = data.HypeTrain || data.hypeTrain || {}; const top = data.Top || data.top || {}; addNativeSection(result, 'Follows', firstArray(events.Follows, events.follows)); addNativeSection(result, 'Cheers', firstArray(events.Cheers, events.cheers)); addNativeSection(result, 'Subs', firstArray(events.Subs, events.subs)); addNativeSection(result, 'ReSubs', firstArray(events.ReSubs, events.ReSub, events.resubs, events.reSubs)); addNativeSection(result, 'Gift Subs', firstArray(events.GiftSubs, events.giftsubs, events.giftSubs)); addNativeSection(result, 'Gift Bombs', firstArray(events.GiftBombs, events.giftbombs, events.giftBombs)); addNativeSection(result, 'Raids', firstArray(events.Raided, events.Raids, events.raided, events.raids)); addNativeSection(result, 'Reward Redemptions', firstArray(events.RewardRedemptions, events.rewardredemptions, events.rewardRedemptions)); addNativeSection(result, 'Goal Contributions', firstArray(events.GoalContributions, events.goalcontributions, events.goalContributions)); addNativeSection(result, 'Game Updates', firstArray(events.GameUpdates, events.gameupdates, events.gameUpdates)); addNativeSection(result, 'Pyramids', firstArray(events.Pyramids, events.pyramids)); addNativeSection(result, 'Hype Trains', firstArray(events.HypeTrains, events.hypetrains, events.hypeTrains)); addNativeSection(result, 'Hype Train Conductors', firstArray(data.HypeTrainConductor, data.hypeTrainConductors, hype.Conductors, hype.conductors)); addNativeSection(result, 'Hype Train Contributors', firstArray(data.HypeTrainContributors, data.hypeTrainContributors, hype.Contributors, hype.contributors)); addNativeSection(result, 'Editors', firstArray(users.Editors, users.editors)); addNativeSection(result, 'Moderators', firstArray(users.Moderator, users.Moderators, users.moderator, users.moderators)); addNativeSection(result, 'Subscribers', firstArray(users.Subscriber, users.Subscribers, users.subscriber, users.subscribers)); addNativeSection(result, 'VIPs', firstArray(users.VIPs, users.Vips, users.vips)); addNativeSection(result, 'Users', firstArray(users.Users, users.users, users.regulars)); addNativeObjectSections(result, data.Groups || data.groups, 'Groups'); addNativeSection(result, 'All Bits', firstArray(data.TopBits && data.TopBits.All, top.allBits, top.AllBits)); addNativeSection(result, 'Month Bits', firstArray(data.TopBits && data.TopBits.Month, top.monthBits, top.MonthBits)); addNativeSection(result, 'Week Bits', firstArray(data.TopBits && data.TopBits.Week, top.weekBits, top.WeekBits)); addNativeSection(result, 'Channel Rewards', firstArray(data.TopChannelRewards, top.channelRewards, top.ChannelRewards)); addNativeObjectSections(result, data.Custom || data.custom, 'Custom'); return result; }
+    function firstArray(...values) { return values.find(Array.isArray) || []; }
+    function addNativeSection(result, title, values) { const items = (Array.isArray(values) ? values : []).map(nativeItem).filter(Boolean); if (items.length) result.push({ title, items }); }
+    function addNativeObjectSections(result, source, fallbackTitle) { if (!source || typeof source !== 'object') return; if (Array.isArray(source)) { addNativeSection(result, fallbackTitle, source); return; } Object.entries(source).forEach(([key, value]) => { if (Array.isArray(value)) addNativeSection(result, prettyTitle(key), value); }); }
     function nativeItem(value) { if (value == null) return null; if (typeof value !== 'object') return { name:String(value) }; const name = value.name || value.user || value.userName || value.username || value.displayName || value.login || value.title || 'Viewer'; const parts = []; ['amount','currency','message','count','bits','tier','viewers'].forEach(key => { if (value[key] != null && String(value[key]).trim()) parts.push(String(value[key])); }); return { name:String(name), message:parts.join(' | ') }; }
     function prettyTitle(value) { return String(value || 'Credits').replace(/([a-z])([A-Z])/g, '$1 $2'); }
     function hiddenSection(title) { const hidden = Array.isArray(settings && settings.HiddenSections) ? settings.HiddenSections : []; const key = String(title || '').toLowerCase(); return hidden.some(item => String(item || '').toLowerCase() === key); }
