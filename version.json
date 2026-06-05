@@ -1,10 +1,10 @@
 {
-  "version": "0.12.1-beta.2.2",
-  "name": "DonConnect Beta 2 Hotfix 2",
+  "version": "0.12.1-beta.2.3",
+  "name": "DonConnect Beta 2 Hotfix 3",
   "channel": "beta",
-  "downloadUrl": "https://github.com/DrPlankton/DonConnect/releases/download/v0.12.1-beta.2.2/DonConnect.Beta2.sb",
-  "releaseUrl": "https://github.com/DrPlankton/DonConnect/releases/tag/v0.12.1-beta.2.2",
+  "downloadUrl": "https://github.com/DrPlankton/DonConnect/releases/download/v0.12.1-beta.2.3/DonConnect.Beta2.sb",
+  "releaseUrl": "https://github.com/DrPlankton/DonConnect/releases/tag/v0.12.1-beta.2.3",
   "changelogUrl": "https://github.com/DrPlankton/DonConnect/blob/main/CHANGELOG_RU.md",
-  "messageRu": "Доступен DonConnect Beta 2 Hotfix 2: срочно исправлена озвучка донат-алертов.",
-  "messageEn": "DonConnect Beta 2 Hotfix 2 is available: donation alert text-to-speech was fixed."
+  "messageRu": "Доступен DonConnect Beta 2 Hotfix 3: добавлен выбор строк для озвучки доната.",
+  "messageEn": "DonConnect Beta 2 Hotfix 3 is available: donation voice line toggles were added."
 }

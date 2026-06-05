@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.1-beta.2.3 - DonConnect Beta 2 Hotfix 3
+
+- Added separate donation voice toggles for donor name, amount, platform, and message.
+- The selected speech lines are saved to JSON and apply to real donations, the voice test button, and fallback browser TTS.
+- All speech lines remain enabled by default to preserve existing behavior.
+
 ## 0.12.1-beta.2.2 - DonConnect Beta 2 Hotfix 2
 
 - Fixed donation alert text-to-speech by loading `System.Speech` correctly and adding a Windows SAPI fallback.
