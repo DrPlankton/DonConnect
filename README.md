@@ -27,16 +27,17 @@ DonConnect is a Streamer.bot extension for receiving donations from several serv
 
 ## Quick Start: Tokens And API Access
 
-### DonationAlerts
-
-For Beta 2 testers, DonationAlerts is the easiest provider to connect.
+### DonationAlerts And Other Providers
 
 1. Import `DonConnect.Beta2.sb` into Streamer.bot.
-2. Find the action `DonConnect - Setup DonationAlerts`.
+2. Find the action `DonConnect - Подключение площадок`.
 3. Right-click its **Command Trigger** and choose **Test Trigger**.
-4. A DonationAlerts login page will open in your browser.
-5. Log in to your own DonationAlerts account and allow access.
-6. Return to Streamer.bot and run `DonConnect - Widget Editor`.
+4. The unified provider connection page will open in your browser.
+5. Use the authorization button for DonationAlerts.
+6. Paste tokens or API keys for other providers and click **Сохранить подключения**.
+7. Return to Streamer.bot and run `DonConnect - Widget Editor`.
+
+Provider rows are collapsible. Each header shows the current connection status, while diagnostic errors are displayed inside the row. The widget editor also has a **Connect providers** shortcut back to this page.
 
 You do not need to create your own DonationAlerts API application for this beta. The shared test application credentials are bundled so testers can connect faster.
 
@@ -45,18 +46,20 @@ Useful links:
 - DonationAlerts dashboard: https://www.donationalerts.com/dashboard
 - DonationAlerts API documentation: https://www.donationalerts.com/apidoc
 
-### Other Providers
+### Token Links
 
-Open the provider setup action in Streamer.bot and paste the token/API key from the matching service dashboard.
+The provider page includes direct links to the relevant service dashboards and API settings.
 
 - StreamElements: account/channel settings and JWT token, https://streamelements.com/dashboard/account/channels
 - StreamElements help: https://support.streamelements.com/hc/en-us/categories/10474362906642-Getting-Started
-- DonatePay RU: https://donatepay.ru/
-- DonatePay EU: https://donatepay.eu/
+- DonatePay RU: https://donatepay.ru/page/api
+- DonatePay EU: https://donatepay.ru/page/api
 - DonatePay/DonationPay API docs: https://api.donationpay.org/documentation/
 - DonateX.gg: https://donatex.gg/
 - ODA docs: https://opendonationassistant.mintlify.app/auth
 - Donate.Stream: https://donate.stream/
+
+Streamlabs, Donate.Stream, and deStream already have provider implementations. StreamEngine is currently shown as **In development**.
 
 Do not paste tokens into stream chat, Discord screenshots, public GitHub issues, or OBS text sources.
 
@@ -120,10 +123,11 @@ OBS dock panel:  OBS custom browser dock
 ## What Is Included In Beta 2
 
 - Built-in browser editor served from the Streamer.bot extension itself.
+- Direct editing for alert, goal, and timer elements: move, eight-handle resize, rotation, per-element reset, optional grid, and center guides without snapping.
 - Donation alert widget with media library, custom tests, replay history, text-to-speech, and blacklist filtering.
 - Goal widget with presets, horizontal/vertical progress, image-fill modes, provider labels, last donor settings, and detailed layout controls.
 - Timer widget with presets, count-up mode, donation-to-time conversion, and manual test amount.
-- Credits widget with Streamer.bot credits data, pause button, section toggles, presets, and live style editing.
+- Credits widget with Streamer.bot credits data, pause button, presets, and live style editing; section visibility follows Streamer.bot Credits settings.
 - Leaderboard widget with presets, editable entries, blacklist filtering, and recent donation history.
 - OBS dock panel for recent donations and replay buttons.
 - Local JSON settings stored in the DonConnect folder next to Streamer.bot, not in AppData.

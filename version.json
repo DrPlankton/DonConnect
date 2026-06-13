@@ -1,10 +1,10 @@
 {
-  "version": "0.12.1-beta.2.4",
-  "name": "DonConnect Beta 2 Hotfix 4",
+  "version": "0.12.1-beta.2.7",
+  "name": "DonConnect Beta 2 Hotfix 7",
   "channel": "beta",
-  "downloadUrl": "https://github.com/DrPlankton/DonConnect/releases/download/v0.12.1-beta.2.4/DonConnect.Beta2.sb",
-  "releaseUrl": "https://github.com/DrPlankton/DonConnect/releases/tag/v0.12.1-beta.2.4",
+  "downloadUrl": "https://github.com/DrPlankton/DonConnect/releases/download/v0.12.1-beta.2.7/DonConnect.Beta2.sb",
+  "releaseUrl": "https://github.com/DrPlankton/DonConnect/releases/tag/v0.12.1-beta.2.7",
   "changelogUrl": "https://github.com/DrPlankton/DonConnect/blob/main/CHANGELOG_RU.md",
-  "messageRu": "Доступен DonConnect Beta 2 Hotfix 4: исправлены лаги титров и список секций Credits.",
-  "messageEn": "DonConnect Beta 2 Hotfix 4 is available: Credits stuttering and section controls were fixed."
+  "messageRu": "Доступен DonConnect Beta 2 Hotfix 7: компактное подключение площадок и полноценное редактирование элементов алерта, цели и таймера.",
+  "messageEn": "DonConnect Beta 2 Hotfix 7 is available: compact provider setup and full direct editing for alert, goal, and timer elements."
 }

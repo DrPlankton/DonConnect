@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.12.1-beta.2.7 - DonConnect Beta 2 Hotfix 7
+
+- Made the provider connection page compact and collapsible, with diagnostic connection status in each header.
+- Added navigation between the widget editor and provider setup, direct DonatePay API links, and a StreamEngine placeholder.
+- Added direct move, eight-handle resize, rotation, and per-element reset for alert, goal, and timer previews.
+- Added an optional alignment grid, canvas center axes, and selected-element center guides without snapping.
+- Enabled direct manipulation for alert and goal images.
+- Removed direct preview controls from Credits and Leaderboard until those editors are ready for element-level manipulation.
+
+## 0.12.1-beta.2.6 - DonConnect Beta 2 Hotfix 6
+
+- Credits now follow the enabled sections in Streamer.bot Credits settings; roll duration is calculated from the amount of content.
+- Added a local JSON backup for provider settings, tokens, and goal/timer state next to Streamer.bot.
+- Fixed decimal opacity persistence and added leaderboard text alignment.
+- Added independent X/Y controls for donor, amount, message, and platform in donation alerts.
+- Fixed manual fallback currency conversion and made timer tests use the production conversion path.
+- Added widget profile export/import without provider secrets or media library files.
+- Added a browser-based provider connection page that never returns saved secrets to the browser.
+- Added direct drag and resize editing for supported preview elements.
+- Made recommended OBS Browser Source dimensions more prominent.
+
+## 0.12.1-beta.2.5 - DonConnect Beta 2 Hotfix 5
+
+- Fixed test Credits being replaced by the regular `credits.cache` on the next poll.
+- The test button now toggles a stable test mode and restores live Streamer.bot Credits on the second click.
+- Streamer.bot Credits and DonConnect donations are now rendered together.
+- Removed duplicate Streamer.bot section controls from the DonConnect editor; section visibility remains managed in Streamer.bot.
+- Added DonConnect donation-section controls for title, donor names, amounts, platforms, and messages.
+- Live mode no longer inserts fake donation rows when DonConnect has no donation history.
+
 ## 0.12.1-beta.2.4 - DonConnect Beta 2 Hotfix 4
 
 - Fixed severe Credits widget stuttering caused by blocking Streamer.bot HTTP requests and repeated full DOM rebuilds.
