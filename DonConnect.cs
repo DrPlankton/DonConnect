@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -16,16 +16,15 @@ public class CPHInline
 {
     private static DonationBridgeRuntime Runtime;
     private static readonly object GlobalDedupeLock = new object();
-    private const string CurrentVersion = "0.12.1-beta.2.7";
+    private const string CurrentVersion = "0.13.0-beta.3.14";
     private const string UpdateFeedUrl = "https://raw.githubusercontent.com/DrPlankton/DonConnect/main/version.json";
-    private const string BundledDonationAlertsClientId = "18717";
-    private const string BundledDonationAlertsClientSecret = "XxOAjz0FeUQlzNWjmWwzxZGpeGb57hSEt0dZskB6";
 
     public void Init()
     {
         EnsureRuntime();
         Runtime.Logger.Info("DonConnect initialized.");
         Runtime.CheckForUpdatesAsync();
+        Runtime.StartFromInit();
     }
 
     public void Dispose()
@@ -33,7 +32,7 @@ public class CPHInline
         if (Runtime != null)
         {
             Runtime.Stop();
-            Runtime.StopWidgetServer();
+            Runtime.StopWidgetServer(false);
         }
     }
 
@@ -61,32 +60,22 @@ public class CPHInline
     public bool SetupSharedDonationAlerts()
     {
         EnsureRuntime();
-        string clientId = ReadArg("sharedClientId");
-        string clientSecret = ReadArg("sharedClientSecret");
-
-        if (IsPlaceholder(clientId) || IsPlaceholder(clientSecret))
-        {
-            clientId = BundledDonationAlertsClientId;
-            clientSecret = BundledDonationAlertsClientSecret;
-        }
+        string clientId = ReadArg("clientId");
+        string clientSecret = ReadArg("clientSecret");
 
         if (string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
         {
-            Runtime.Logger.Warn("Для общего режима нужны аргументы sharedClientId и sharedClientSecret.");
+            Runtime.Logger.Warn("DonationAlerts: общий beta-клиент удален. Создайте свое приложение DonationAlerts и укажите clientId/clientSecret.");
+            CPH.SendMessage("DonConnect: для DonationAlerts теперь нужно свое приложение. Откройте DonConnect Providers, создайте приложение DA и вставьте Client ID + Client Secret.");
             return false;
         }
 
-        Runtime.Settings.Set("donationalerts.sharedClientId", clientId.Trim(), true);
-        Runtime.Settings.Set("donationalerts.sharedClientSecret", clientSecret.Trim(), true);
-        Runtime.Settings.Set("donationalerts.authMode", "shared", true);
+        Runtime.Settings.Set("donationalerts.clientId", clientId.Trim(), true);
+        Runtime.Settings.Set("donationalerts.clientSecret", clientSecret.Trim(), true);
+        Runtime.Settings.Set("donationalerts.authMode", "own", true);
         Runtime.Settings.Set("donationalerts.enabled", "true", true);
-        Runtime.Logger.Info("DonationAlerts переведен в shared mode. Shared Client ID: " + SecretMask.Mask(clientId));
+        Runtime.Logger.Info("DonationAlerts сохранен через личное приложение. Client ID: " + SecretMask.Mask(clientId));
         return true;
-    }
-
-    private bool IsPlaceholder(string value)
-    {
-        return string.IsNullOrWhiteSpace(value) || value.IndexOf("PASTE_", StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     public bool SetupAndAuthorizeDonationAlerts()
@@ -114,10 +103,10 @@ public class CPHInline
     public bool UseSharedDonationAlerts()
     {
         EnsureRuntime();
-        Runtime.Settings.Set("donationalerts.authMode", "shared", true);
-        Runtime.Settings.Set("donationalerts.enabled", "true", true);
-        Runtime.Logger.Info("DonationAlerts auth mode: shared.");
-        return true;
+        Runtime.Settings.Set("donationalerts.authMode", "own", true);
+        Runtime.Logger.Warn("DonationAlerts shared mode удален в Beta 3. Используйте свое приложение DonationAlerts.");
+        CPH.SendMessage("DonConnect: общий DonationAlerts-клиент удален. Откройте DonConnect Providers и подключите свое приложение DA.");
+        return false;
     }
 
     public bool UseOwnDonationAlerts()
@@ -553,8 +542,32 @@ public class CPHInline
     public bool StartBridge()
     {
         EnsureRuntime();
-        Runtime.Start(true);
-        return true;
+        bool ok = true;
+
+        try
+        {
+            Runtime.Start(true);
+        }
+        catch (Exception ex)
+        {
+            ok = false;
+            ReportActionError("DonConnect providers were not started", ex);
+        }
+
+        try
+        {
+            Runtime.StartWidgetServer();
+        }
+        catch (Exception ex)
+        {
+            ok = false;
+            ReportActionError("Widget server was not started", ex);
+        }
+
+        Runtime.EnsureWidgetServerReliability("StartBridge action");
+        Runtime.EnsureStreamSessionReset("StartBridge action");
+
+        return ok;
     }
 
     public bool StopBridge()
@@ -576,24 +589,32 @@ public class CPHInline
     public bool TestDonation()
     {
         EnsureRuntime();
-        var testEvent = new UnifiedDonationEvent
-        {
-            Source = "Test",
-            ProviderName = "Test",
-            EventType = "donation",
-            DonationId = "test-" + DateTime.UtcNow.Ticks.ToString(CultureInfo.InvariantCulture),
-            UserName = "\u0422\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u0437\u0440\u0438\u0442\u0435\u043b\u044c",
-            Amount = 100,
-            Currency = "RUB",
-            Message = "\u042d\u0442\u043e \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u0434\u043e\u043d\u0430\u0442 \u0438\u0437 DonConnect.",
-            Timestamp = DateTime.UtcNow,
-            IsAnonymous = false,
-            RawJson = "{\"source\":\"Test\"}"
-        };
-
-        Runtime.HandleDonation(testEvent);
-        Runtime.Logger.Info("Test donation was sent.");
+        Runtime.SendWidgetTestDonation("default");
+        Runtime.Logger.Info("Test donation alert was sent without changing goal, timer, credits or leaderboard.");
         return true;
+    }
+
+    public bool ResetCreditsInfo()
+    {
+        EnsureRuntime();
+        bool streamerBotCleared = Runtime.ResetCreditsInfo();
+        if (streamerBotCleared)
+        {
+            Runtime.Logger.Info("Credits information was reset in DonConnect and Streamer.bot.");
+            return true;
+        }
+
+        Runtime.Logger.Warn("Credits were not reset: Streamer.bot HTTP Server did not answer /ClearCredits. Enable Streamer.bot HTTP Server on 127.0.0.1:7474.");
+        return false;
+    }
+
+    public bool ResetStreamSessionInfo()
+    {
+        EnsureRuntime();
+        bool ok = Runtime.ResetStreamSessionInfo();
+        if (!ok)
+            Runtime.Logger.Warn("Stream session reset was not completed. Check Streamer.bot HTTP Server and DonConnect logs.");
+        return ok;
     }
 
     public bool StartWidgetServer()
@@ -741,6 +762,9 @@ public class CPHInline
         private readonly string InstanceId = Guid.NewGuid().ToString("N");
         private CancellationTokenSource RuntimeLeaseCancellation;
         private DonConnectWidgetServer WidgetServer;
+        private int WidgetServerWatchdogStarted;
+        private int WidgetServerStartupRetryRunning;
+        private int StreamSessionResetRetryRunning;
 
         public BridgeSettings Settings { get; private set; }
         public BridgeLogger Logger { get; private set; }
@@ -771,6 +795,14 @@ public class CPHInline
         private string DefaultSettingsDirectory()
         {
             return DonConnectPaths.DataDirectory(Settings.Get("donconnect.dataDirectory", ""));
+        }
+
+        private string DonationLogsDirectory()
+        {
+            string configured = Settings.Get("widget.dataDirectory", "");
+            if (string.IsNullOrWhiteSpace(configured))
+                configured = Settings.Get("donconnect.dataDirectory", "");
+            return Path.Combine(DonConnectPaths.DataDirectory(configured), "donation-logs");
         }
 
         public void UpdateArgs(Dictionary<string, object> args)
@@ -892,6 +924,45 @@ public class CPHInline
             Start(false);
         }
 
+        public void StartFromInit()
+        {
+            try
+            {
+                if (HasEnabledProvider())
+                    Start(false);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("DonConnect автозапуск провайдеров не завершился: " + ex.Message);
+            }
+
+            EnsureWidgetServerReliability("Streamer.bot init");
+            EnsureStreamSessionReset("Streamer.bot init");
+        }
+
+        private bool HasEnabledProvider()
+        {
+            string[] providerKeys =
+            {
+                "donationalerts",
+                "generic",
+                "streamelements",
+                "streamlabs",
+                "donatepayru",
+                "donatepayeu",
+                "donatestream",
+                "destream",
+                "donatex",
+                "oda"
+            };
+
+            foreach (string key in providerKeys)
+                if (Settings.GetBool(key + ".enabled", false))
+                    return true;
+
+            return false;
+        }
+
         public void Start(bool force)
         {
             Stop();
@@ -977,16 +1048,106 @@ public class CPHInline
             if (WidgetServer == null)
                 WidgetServer = new DonConnectWidgetServer(Settings, Logger, HandleDonation, ConvertAmountForWidget, AuthorizeDonationAlerts, delegate { Start(true); });
 
+            if (WidgetServer.IsRunning && !WidgetServer.IsResponsive(900))
+            {
+                Logger.Warn("DonConnect widget server is listening, but does not answer. Restarting local widget server.");
+                WidgetServer.Stop(false);
+                Thread.Sleep(150);
+            }
+
             WidgetServer.Start();
             Logger.Info("Widget editor: " + WidgetServer.EditorUrl);
             Logger.Info("OBS widget URL: " + WidgetServer.WidgetUrl);
             Logger.Info("OBS dock URL: " + WidgetServer.DockUrl);
         }
 
+        public void EnsureWidgetServerReliability(string reason)
+        {
+            QueueWidgetServerStartupRetries(reason);
+            StartWidgetServerWatchdog();
+        }
+
+        public void EnsureStreamSessionReset(string reason)
+        {
+            QueueStreamSessionResetRetries(reason);
+        }
+
+        private void QueueWidgetServerStartupRetries(string reason)
+        {
+            if (Interlocked.Exchange(ref WidgetServerStartupRetryRunning, 1) == 1)
+                return;
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    for (int attempt = 1; attempt <= 24; attempt++)
+                    {
+                        try
+                        {
+                            StartWidgetServer();
+                            if (WidgetServer != null && WidgetServer.IsRunning && WidgetServer.IsResponsive(1500))
+                            {
+                                if (attempt > 1)
+                                    Logger.Info("DonConnect widget server recovered after retry " + attempt.ToString(CultureInfo.InvariantCulture) + " (" + reason + ").");
+                                return;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            if (attempt == 1 || attempt == 6 || attempt == 12 || attempt == 24)
+                                Logger.Warn("DonConnect widget server auto-start retry " + attempt.ToString(CultureInfo.InvariantCulture) + " failed: " + ex.Message);
+                        }
+
+                        Thread.Sleep(attempt <= 8 ? 5000 : 15000);
+                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref WidgetServerStartupRetryRunning, 0);
+                }
+            });
+        }
+
+        private void StartWidgetServerWatchdog()
+        {
+            if (Interlocked.Exchange(ref WidgetServerWatchdogStarted, 1) == 1)
+                return;
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                while (true)
+                {
+                    Thread.Sleep(30000);
+                    if (Settings.Get("widget.enabled", "true").Equals("false", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    try
+                    {
+                        bool needsRestart = WidgetServer == null || !WidgetServer.IsRunning || !WidgetServer.IsResponsive(1500);
+                        if (!needsRestart)
+                            continue;
+
+                        Logger.Warn("DonConnect widget server watchdog is restoring the local server.");
+                        QueueWidgetServerStartupRetries("watchdog");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn("DonConnect widget server watchdog failed: " + ex.Message);
+                    }
+                }
+            });
+        }
+
         public void StopWidgetServer()
         {
+            StopWidgetServer(true);
+        }
+
+        public void StopWidgetServer(bool rememberDisabled)
+        {
             if (WidgetServer != null)
-                WidgetServer.Stop();
+                WidgetServer.Stop(rememberDisabled);
         }
 
         public void OpenWidgetEditor()
@@ -1017,8 +1178,63 @@ public class CPHInline
             if (WidgetServer == null || !WidgetServer.IsRunning)
                 StartWidgetServer();
 
-            HandleDonation(CreateWidgetTestDonation(kind));
-            Logger.Info("Widget test donation was sent.");
+            WidgetServer.PushDonation(CreateWidgetTestDonation(kind), false);
+            Logger.Info("Widget test donation was shown without changing goal, timer, credits or leaderboard.");
+        }
+
+        public bool ResetCreditsInfo()
+        {
+            if (WidgetServer == null || !WidgetServer.IsRunning)
+                StartWidgetServer();
+
+            return WidgetServer.ResetCreditsInfo();
+        }
+
+        public bool ResetStreamSessionInfo()
+        {
+            if (WidgetServer == null || !WidgetServer.IsRunning)
+                StartWidgetServer();
+
+            return WidgetServer.ResetStreamSessionInfo();
+        }
+
+        private void QueueStreamSessionResetRetries(string reason)
+        {
+            if (Interlocked.Exchange(ref StreamSessionResetRetryRunning, 1) == 1)
+                return;
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    for (int attempt = 1; attempt <= 36; attempt++)
+                    {
+                        try
+                        {
+                            if (WidgetServer == null || !WidgetServer.IsRunning || !WidgetServer.IsResponsive(1500))
+                                StartWidgetServer();
+
+                            if (WidgetServer != null && WidgetServer.ResetStreamSessionInfo())
+                            {
+                                if (attempt > 1)
+                                    Logger.Info("DonConnect stream session reset completed after retry " + attempt.ToString(CultureInfo.InvariantCulture) + " (" + reason + ").");
+                                return;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            if (attempt == 1 || attempt == 6 || attempt == 12 || attempt == 24 || attempt == 36)
+                                Logger.Warn("DonConnect stream session reset retry " + attempt.ToString(CultureInfo.InvariantCulture) + " failed: " + ex.Message);
+                        }
+
+                        Thread.Sleep(attempt <= 12 ? 5000 : 15000);
+                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref StreamSessionResetRetryRunning, 0);
+                }
+            });
         }
 
         public void OpenProviderEditor()
@@ -1502,7 +1718,7 @@ public class CPHInline
 
         public DonationAlertsProvider CreateDonationAlertsProvider()
         {
-            return new DonationAlertsProvider(Settings, Logger, BundledDonationAlertsClientId, BundledDonationAlertsClientSecret);
+            return new DonationAlertsProvider(Settings, Logger);
         }
 
         public void WriteCreditsOverlayConfig(string configPath, string title, string subtitle, string outro, string duration, string accent, string text, string muted, string background, string font, string donationFields, string labels, string hideSections, string showSections)
@@ -1605,6 +1821,7 @@ public class CPHInline
             UpdateDonationGoal(donationEvent);
             UpdateDonationTimer(donationEvent);
             SaveDonationDiagnostics(donationEvent);
+            LogDonationToDailyFile(donationEvent);
             TriggerDonationEvents(donationEvent);
             SendDonationToCredits(donationEvent);
             if (WidgetServer != null && WidgetServer.IsRunning)
@@ -1760,6 +1977,52 @@ public class CPHInline
                 Settings.Set(providerKey + ".diagnostics.lastDonationAt", DateTime.UtcNow.ToString("o"), true);
                 Settings.Set(providerKey + ".diagnostics.lastDonation", summary, true);
             }
+        }
+
+        private void LogDonationToDailyFile(UnifiedDonationEvent e)
+        {
+            try
+            {
+                if (e == null || IsTestDonation(e))
+                    return;
+
+                string directory = DonationLogsDirectory();
+                if (!Directory.Exists(directory))
+                    Directory.CreateDirectory(directory);
+
+                DateTime localTime = e.Timestamp == default(DateTime) ? DateTime.Now : e.Timestamp.ToLocalTime();
+                string path = Path.Combine(directory, localTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + ".txt");
+                string donor = string.IsNullOrWhiteSpace(e.UserName) ? "Anonymous" : e.UserName;
+                string amount = (e.Amount.ToString("0.##", CultureInfo.InvariantCulture) + " " + (e.Currency ?? "")).Trim();
+                string platform = FirstNonEmptyLocal(e.ProviderName, e.Source, "unknown");
+                string line = localTime.ToString("dd/MM/yy", CultureInfo.InvariantCulture)
+                    + " - " + SafeLogText(donor)
+                    + " - " + SafeLogText(amount)
+                    + " - " + SafeLogText(platform)
+                    + " - " + SafeLogText(e.Message ?? "");
+                File.AppendAllText(path, line + Environment.NewLine, new UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Donation log was not written: " + ex.Message);
+            }
+        }
+
+        private bool IsTestDonation(UnifiedDonationEvent e)
+        {
+            string id = (e.DonationId ?? "").Trim();
+            string provider = (e.ProviderName ?? "").Trim();
+            string source = (e.Source ?? "").Trim();
+            return id.StartsWith("widget-test", StringComparison.OrdinalIgnoreCase)
+                || provider.Equals("Widget Test", StringComparison.OrdinalIgnoreCase)
+                || source.Equals("Widget Test", StringComparison.OrdinalIgnoreCase)
+                || provider.Equals("Custom test", StringComparison.OrdinalIgnoreCase)
+                || source.Equals("Custom test", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private string SafeLogText(string value)
+        {
+            return (value ?? "").Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Trim();
         }
 
         private void UpdateDonationGoal(UnifiedDonationEvent e)
@@ -2295,7 +2558,12 @@ public class CPHInline
                 payload["action"] = action;
 
                 var args = new JObject();
-                args["donorName"] = string.IsNullOrWhiteSpace(donationEvent.UserName) ? "Anonymous" : donationEvent.UserName;
+                string creditsDonorName = string.IsNullOrWhiteSpace(donationEvent.UserName) ? "Anonymous" : donationEvent.UserName;
+                args["name"] = creditsDonorName;
+                args["donorName"] = creditsDonorName;
+                args["donor"] = creditsDonorName;
+                args["donationUser"] = creditsDonorName;
+                args["user"] = creditsDonorName;
                 args["amount"] = donationEvent.Amount.ToString(CultureInfo.InvariantCulture);
                 args["currency"] = donationEvent.Currency ?? "";
                 args["platform"] = donationEvent.ProviderName ?? donationEvent.Source ?? "Donation";
@@ -2755,7 +3023,6 @@ public class CPHInline
         }
     }
 }
-
 public static class DonConnectPaths
 {
     public static string DataDirectory(string configuredDirectory)
@@ -2937,20 +3204,16 @@ public class DonationAlertsProvider : IDonationProvider
 
     private readonly BridgeSettings Settings;
     private readonly BridgeLogger Logger;
-    private readonly string BundledClientId;
-    private readonly string BundledClientSecret;
     private ClientWebSocket Socket;
     private CancellationTokenSource Cancellation;
 
     public string ProviderName { get { return ProviderDisplayName; } }
     public event Action<UnifiedDonationEvent> DonationReceived;
 
-    public DonationAlertsProvider(BridgeSettings settings, BridgeLogger logger, string bundledClientId, string bundledClientSecret)
+    public DonationAlertsProvider(BridgeSettings settings, BridgeLogger logger)
     {
         Settings = settings;
         Logger = logger;
-        BundledClientId = bundledClientId ?? "";
-        BundledClientSecret = bundledClientSecret ?? "";
     }
 
     public Task ConnectAsync()
@@ -3029,7 +3292,7 @@ public class DonationAlertsProvider : IDonationProvider
 
         if (string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
         {
-            Logger.Warn("DonationAlerts: OAuth credentials не настроены. Выберите own mode или настройте shared mode.");
+            Logger.Warn("DonationAlerts: OAuth credentials не настроены. Создайте приложение DonationAlerts и вставьте Client ID + Client Secret в DonConnect Providers.");
             return false;
         }
 
@@ -3296,12 +3559,10 @@ public class DonationAlertsProvider : IDonationProvider
     private OAuthCredentials GetCredentials()
     {
         string mode = Settings.Get(ProviderKey + ".authMode", "own").ToLowerInvariant();
-
         if (mode == "shared")
         {
-            string sharedClientId = FirstNonEmpty(Settings.Get(ProviderKey + ".sharedClientId", ""), BundledClientId);
-            string sharedClientSecret = FirstNonEmpty(Settings.Get(ProviderKey + ".sharedClientSecret", ""), BundledClientSecret);
-            return new OAuthCredentials { ClientId = sharedClientId, ClientSecret = sharedClientSecret, Mode = "shared" };
+            Logger.Warn("DonationAlerts shared mode удален в Beta 3. Переключаю провайдер на личное приложение пользователя.");
+            Settings.Set(ProviderKey + ".authMode", "own", true);
         }
 
         return new OAuthCredentials
@@ -5211,18 +5472,28 @@ public class WidgetSettings
     public string TextColor { get; set; }
     public string AccentColor { get; set; }
     public double AnimationDuration { get; set; }
+    public double EntryAnimationDuration { get; set; }
+    public double ExitAnimationDuration { get; set; }
     public string FontFamily { get; set; }
     public string DonorFontFamily { get; set; }
     public string AmountFontFamily { get; set; }
     public string MessageFontFamily { get; set; }
     public string PlatformFontFamily { get; set; }
+    public int DonorFontSize { get; set; }
+    public int AmountFontSize { get; set; }
+    public int MessageFontSize { get; set; }
+    public int PlatformFontSize { get; set; }
     public string DonorTemplate { get; set; }
     public string AmountTemplate { get; set; }
     public string MessageTemplate { get; set; }
     public string PlatformTemplate { get; set; }
     public bool ShowBackground { get; set; }
     public bool ShowProgressBar { get; set; }
+    public bool ShowDonor { get; set; }
+    public bool ShowAmount { get; set; }
+    public bool ShowMessage { get; set; }
     public bool ShowPlatform { get; set; }
+    public bool ShowMedia { get; set; }
     public int DisplayDuration { get; set; }
     public string EntryAnimation { get; set; }
     public string ExitAnimation { get; set; }
@@ -5237,6 +5508,14 @@ public class WidgetSettings
     public int MediaX { get; set; }
     public int MediaY { get; set; }
     public int MediaRotation { get; set; }
+    public bool ShowDecorImage { get; set; }
+    public string DecorImageFile { get; set; }
+    public string DecorImageFit { get; set; }
+    public int DecorImageWidth { get; set; }
+    public int DecorImageHeight { get; set; }
+    public int DecorImageX { get; set; }
+    public int DecorImageY { get; set; }
+    public int DecorImageRotation { get; set; }
     public string TextAlign { get; set; }
     public int DonorX { get; set; }
     public int DonorY { get; set; }
@@ -5271,6 +5550,7 @@ public class WidgetSettings
     public int SpeechVolume { get; set; }
     public bool VideoMuted { get; set; }
     public JArray AlertRules { get; set; }
+    public JArray LayerOrder { get; set; }
     public string PresetName { get; set; }
     public string Language { get; set; }
 
@@ -5288,18 +5568,28 @@ public class WidgetSettings
             TextColor = "#f8fbff",
             AccentColor = "#35d07f",
             AnimationDuration = 650,
+            EntryAnimationDuration = 650,
+            ExitAnimationDuration = 650,
             FontFamily = "Segoe UI",
             DonorFontFamily = "",
             AmountFontFamily = "",
             MessageFontFamily = "",
             PlatformFontFamily = "",
+            DonorFontSize = 28,
+            AmountFontSize = 25,
+            MessageFontSize = 20,
+            PlatformFontSize = 16,
             DonorTemplate = "{donor}",
             AmountTemplate = "{amount} {currency}",
             MessageTemplate = "{message}",
             PlatformTemplate = "{platform}",
             ShowBackground = true,
             ShowProgressBar = false,
+            ShowDonor = true,
+            ShowAmount = true,
+            ShowMessage = true,
             ShowPlatform = true,
+            ShowMedia = true,
             DisplayDuration = 9000,
             EntryAnimation = "fade",
             ExitAnimation = "fade",
@@ -5314,6 +5604,14 @@ public class WidgetSettings
             MediaX = 0,
             MediaY = 0,
             MediaRotation = 0,
+            ShowDecorImage = false,
+            DecorImageFile = "",
+            DecorImageFit = "contain",
+            DecorImageWidth = 220,
+            DecorImageHeight = 160,
+            DecorImageX = 0,
+            DecorImageY = 0,
+            DecorImageRotation = 0,
             TextAlign = "center",
             DonorX = 0,
             DonorY = 0,
@@ -5348,6 +5646,7 @@ public class WidgetSettings
             SpeechVolume = 85,
             VideoMuted = true,
             AlertRules = new JArray(),
+            LayerOrder = new JArray("background", "decor", "media", "donor", "amount", "message", "platform"),
             PresetName = "Minimal Dark",
             Language = "en"
         };
@@ -5366,18 +5665,28 @@ public class WidgetSettings
         json["TextColor"] = TextColor ?? "#f8fbff";
         json["AccentColor"] = AccentColor ?? "#35d07f";
         json["AnimationDuration"] = AnimationDuration;
+        json["EntryAnimationDuration"] = EntryAnimationDuration;
+        json["ExitAnimationDuration"] = ExitAnimationDuration;
         json["FontFamily"] = FontFamily ?? "Segoe UI";
         json["DonorFontFamily"] = DonorFontFamily ?? "";
         json["AmountFontFamily"] = AmountFontFamily ?? "";
         json["MessageFontFamily"] = MessageFontFamily ?? "";
         json["PlatformFontFamily"] = PlatformFontFamily ?? "";
+        json["DonorFontSize"] = DonorFontSize;
+        json["AmountFontSize"] = AmountFontSize;
+        json["MessageFontSize"] = MessageFontSize;
+        json["PlatformFontSize"] = PlatformFontSize;
         json["DonorTemplate"] = DonorTemplate ?? "{donor}";
         json["AmountTemplate"] = AmountTemplate ?? "{amount} {currency}";
         json["MessageTemplate"] = MessageTemplate ?? "{message}";
         json["PlatformTemplate"] = PlatformTemplate ?? "{platform}";
         json["ShowBackground"] = ShowBackground;
         json["ShowProgressBar"] = ShowProgressBar;
+        json["ShowDonor"] = ShowDonor;
+        json["ShowAmount"] = ShowAmount;
+        json["ShowMessage"] = ShowMessage;
         json["ShowPlatform"] = ShowPlatform;
+        json["ShowMedia"] = ShowMedia;
         json["DisplayDuration"] = DisplayDuration;
         json["EntryAnimation"] = EntryAnimation ?? "fade";
         json["ExitAnimation"] = ExitAnimation ?? "fade";
@@ -5392,6 +5701,14 @@ public class WidgetSettings
         json["MediaX"] = MediaX;
         json["MediaY"] = MediaY;
         json["MediaRotation"] = MediaRotation;
+        json["ShowDecorImage"] = ShowDecorImage;
+        json["DecorImageFile"] = DecorImageFile ?? "";
+        json["DecorImageFit"] = DecorImageFit ?? "contain";
+        json["DecorImageWidth"] = DecorImageWidth;
+        json["DecorImageHeight"] = DecorImageHeight;
+        json["DecorImageX"] = DecorImageX;
+        json["DecorImageY"] = DecorImageY;
+        json["DecorImageRotation"] = DecorImageRotation;
         json["TextAlign"] = TextAlign ?? "center";
         json["DonorX"] = DonorX;
         json["DonorY"] = DonorY;
@@ -5426,6 +5743,7 @@ public class WidgetSettings
         json["SpeechVolume"] = SpeechVolume;
         json["VideoMuted"] = VideoMuted;
         json["AlertRules"] = AlertRules == null ? new JArray() : AlertRules.DeepClone();
+        json["LayerOrder"] = LayerOrder == null ? new JArray("background", "decor", "media", "donor", "amount", "message", "platform") : LayerOrder.DeepClone();
         json["PresetName"] = PresetName ?? "Minimal Dark";
         json["Language"] = Language ?? "en";
         return json;
@@ -5448,18 +5766,28 @@ public class WidgetSettings
         settings.TextColor = StringValue(json, "TextColor", settings.TextColor);
         settings.AccentColor = StringValue(json, "AccentColor", settings.AccentColor);
         settings.AnimationDuration = ClampDouble(DoubleValue(json, "AnimationDuration", settings.AnimationDuration), 0, 5000);
+        settings.EntryAnimationDuration = ClampDouble(DoubleValue(json, "EntryAnimationDuration", settings.EntryAnimationDuration > 0 ? settings.EntryAnimationDuration : settings.AnimationDuration), 0, 5000);
+        settings.ExitAnimationDuration = ClampDouble(DoubleValue(json, "ExitAnimationDuration", settings.ExitAnimationDuration > 0 ? settings.ExitAnimationDuration : settings.AnimationDuration), 0, 5000);
         settings.FontFamily = StringValue(json, "FontFamily", settings.FontFamily);
         settings.DonorFontFamily = StringValue(json, "DonorFontFamily", settings.DonorFontFamily);
         settings.AmountFontFamily = StringValue(json, "AmountFontFamily", settings.AmountFontFamily);
         settings.MessageFontFamily = StringValue(json, "MessageFontFamily", settings.MessageFontFamily);
         settings.PlatformFontFamily = StringValue(json, "PlatformFontFamily", settings.PlatformFontFamily);
+        settings.DonorFontSize = ClampInt(IntValue(json, "DonorFontSize", settings.DonorFontSize), 8, 160);
+        settings.AmountFontSize = ClampInt(IntValue(json, "AmountFontSize", settings.AmountFontSize), 8, 160);
+        settings.MessageFontSize = ClampInt(IntValue(json, "MessageFontSize", settings.MessageFontSize), 8, 160);
+        settings.PlatformFontSize = ClampInt(IntValue(json, "PlatformFontSize", settings.PlatformFontSize), 8, 160);
         settings.DonorTemplate = StringValue(json, "DonorTemplate", settings.DonorTemplate);
         settings.AmountTemplate = StringValue(json, "AmountTemplate", settings.AmountTemplate);
         settings.MessageTemplate = StringValue(json, "MessageTemplate", settings.MessageTemplate);
         settings.PlatformTemplate = StringValue(json, "PlatformTemplate", settings.PlatformTemplate);
         settings.ShowBackground = BoolValue(json, "ShowBackground", settings.ShowBackground);
         settings.ShowProgressBar = BoolValue(json, "ShowProgressBar", settings.ShowProgressBar);
+        settings.ShowDonor = BoolValue(json, "ShowDonor", settings.ShowDonor);
+        settings.ShowAmount = BoolValue(json, "ShowAmount", settings.ShowAmount);
+        settings.ShowMessage = BoolValue(json, "ShowMessage", settings.ShowMessage);
         settings.ShowPlatform = BoolValue(json, "ShowPlatform", settings.ShowPlatform);
+        settings.ShowMedia = BoolValue(json, "ShowMedia", settings.ShowMedia);
         settings.DisplayDuration = ClampInt(IntValue(json, "DisplayDuration", settings.DisplayDuration), 500, 60000);
         settings.EntryAnimation = ChoiceValue(json, "EntryAnimation", settings.EntryAnimation, "none", "fade", "slide-left", "slide-right", "slide-up", "slide-down", "zoom");
         settings.ExitAnimation = ChoiceValue(json, "ExitAnimation", settings.ExitAnimation, "none", "fade", "slide-left", "slide-right", "slide-up", "slide-down", "zoom", "scatter");
@@ -5474,6 +5802,14 @@ public class WidgetSettings
         settings.MediaX = ClampInt(IntValue(json, "MediaX", settings.MediaX), -800, 800);
         settings.MediaY = ClampInt(IntValue(json, "MediaY", settings.MediaY), -600, 600);
         settings.MediaRotation = ClampInt(IntValue(json, "MediaRotation", settings.MediaRotation), -180, 180);
+        settings.ShowDecorImage = BoolValue(json, "ShowDecorImage", settings.ShowDecorImage);
+        settings.DecorImageFile = OptionalStringValue(json, "DecorImageFile", settings.DecorImageFile);
+        settings.DecorImageFit = ChoiceValue(json, "DecorImageFit", settings.DecorImageFit, "contain", "cover");
+        settings.DecorImageWidth = ClampInt(IntValue(json, "DecorImageWidth", settings.DecorImageWidth), 20, 1600);
+        settings.DecorImageHeight = ClampInt(IntValue(json, "DecorImageHeight", settings.DecorImageHeight), 20, 1000);
+        settings.DecorImageX = ClampInt(IntValue(json, "DecorImageX", settings.DecorImageX), -800, 800);
+        settings.DecorImageY = ClampInt(IntValue(json, "DecorImageY", settings.DecorImageY), -600, 600);
+        settings.DecorImageRotation = ClampInt(IntValue(json, "DecorImageRotation", settings.DecorImageRotation), -180, 180);
         settings.TextAlign = ChoiceValue(json, "TextAlign", settings.TextAlign, "left", "center", "right");
         settings.DonorX = ClampInt(IntValue(json, "DonorX", settings.DonorX), -800, 800);
         settings.DonorY = ClampInt(IntValue(json, "DonorY", settings.DonorY), -600, 600);
@@ -5508,6 +5844,9 @@ public class WidgetSettings
         settings.SpeechVolume = ClampInt(IntValue(json, "SpeechVolume", settings.SpeechVolume), 0, 100);
         settings.VideoMuted = BoolValue(json, "VideoMuted", settings.VideoMuted);
         settings.AlertRules = NormalizeAlertRules(json["AlertRules"] as JArray);
+        settings.LayerOrder = StringArray(json["LayerOrder"] as JArray);
+        if (settings.LayerOrder.Count == 0)
+            settings.LayerOrder = new JArray("background", "decor", "media", "donor", "amount", "message", "platform");
         settings.PresetName = StringValue(json, "PresetName", settings.PresetName);
         settings.Language = NormalizeLanguage(StringValue(json, "Language", settings.Language));
         return settings;
@@ -5623,7 +5962,7 @@ public class DonConnectWidgetServer
 {
     private const string Host = "127.0.0.1";
     private const int DefaultPort = 3987;
-    private const string EditorVersion = "0.12.1-beta.2.7";
+    private const string EditorVersion = "0.13.0-beta.3.14";
     private const int MaxHttpBodyBytes = 48 * 1024 * 1024;
     private const int MaxAlertMediaBytes = 32 * 1024 * 1024;
     private readonly BridgeSettings BridgeSettings;
@@ -5654,8 +5993,10 @@ public class DonConnectWidgetServer
     private string NativeCreditsCachePath = "";
     private DateTime NativeCreditsCacheWriteUtc = DateTime.MinValue;
     private DateTime NativeCreditsLastHttpAttemptUtc = DateTime.MinValue;
+    private DateTime NativeCreditsIgnoreFileUntilUtc = DateTime.MinValue;
     private int NativeCreditsHttpRefreshPending;
     private bool CreditsTestMode;
+    private readonly DateTime SessionStartedUtc = DateTime.UtcNow;
 
     public DonConnectWidgetServer(BridgeSettings settings, BridgeLogger logger, Action<UnifiedDonationEvent> donationHandler, Func<UnifiedDonationEvent, string, decimal> currencyConverter, Func<bool> donationAlertsAuthorizer, Action providersRestart)
     {
@@ -5687,6 +6028,43 @@ public class DonConnectWidgetServer
     public string LeaderboardUrl { get { return BaseUrl + "/leaderboard"; } }
     public string DockUrl { get { return BaseUrl + "/dock"; } }
 
+    public bool IsResponsive(int timeoutMs)
+    {
+        if (!IsRunning)
+            return false;
+
+        try
+        {
+            using (var client = new TcpClient())
+            {
+                IAsyncResult connect = client.BeginConnect(IPAddress.Loopback, Port, null, null);
+                if (!connect.AsyncWaitHandle.WaitOne(Math.Max(100, timeoutMs)))
+                    return false;
+
+                client.EndConnect(connect);
+                client.ReceiveTimeout = Math.Max(100, timeoutMs);
+                client.SendTimeout = Math.Max(100, timeoutMs);
+
+                using (NetworkStream stream = client.GetStream())
+                {
+                    byte[] requestBytes = Encoding.ASCII.GetBytes("GET /donconnect/api/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+                    stream.Write(requestBytes, 0, requestBytes.Length);
+                    var buffer = new byte[256];
+                    int read = stream.Read(buffer, 0, buffer.Length);
+                    if (read <= 0)
+                        return false;
+
+                    string response = Encoding.ASCII.GetString(buffer, 0, read);
+                    return response.StartsWith("HTTP/1.1 200", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public void Start()
     {
         if (IsRunning)
@@ -5699,6 +6077,7 @@ public class DonConnectWidgetServer
         LeaderboardSettings = LoadLeaderboardSettings();
         ContentFilterSettings = LoadContentFilterSettings();
         LoadLeaderboardData();
+        ResetLeaderboardForSessionIfNeeded();
         EnsureAlertMediaLibrary();
         Cancellation = new CancellationTokenSource();
         StartListener(preferredPort);
@@ -5738,6 +6117,11 @@ public class DonConnectWidgetServer
 
     public void Stop()
     {
+        Stop(true);
+    }
+
+    public void Stop(bool rememberDisabled)
+    {
         try
         {
             if (Cancellation != null)
@@ -5753,25 +6137,58 @@ public class DonConnectWidgetServer
         catch { }
 
         Listener = null;
-        BridgeSettings.Set("widget.enabled", "false", true);
+        if (rememberDisabled)
+            BridgeSettings.Set("widget.enabled", "false", true);
     }
 
     public void PushDonation(UnifiedDonationEvent donation)
+    {
+        PushDonation(donation, true);
+    }
+
+    public void PushDonation(UnifiedDonationEvent donation, bool affectStats)
     {
         JObject speechDonation;
         WidgetSettings speechSettings;
         lock (StateLock)
         {
             LastDonation = DonationToJson(donation ?? DefaultDonation());
+            bool isTestDonation = !affectStats || IsTestDonationJson(LastDonation);
+            LastDonation["isTest"] = isTestDonation;
             AddRecentDonation(LastDonation);
-            AddCreditDonation(LastDonation);
-            AddLeaderboardDonation(LastDonation);
+            if (!isTestDonation)
+            {
+                AddCreditDonation(LastDonation);
+                AddLeaderboardDonation(LastDonation);
+            }
             EventId++;
             speechDonation = (JObject)LastDonation.DeepClone();
             speechSettings = CurrentSettings;
         }
 
         SpeakDonationIfEnabled(speechDonation, speechSettings);
+    }
+
+    private bool IsTestDonationJson(JObject donation)
+    {
+        if (donation == null)
+            return false;
+
+        string id = JsonText(donation, "id");
+        string provider = JsonText(donation, "provider", JsonText(donation, "platform"));
+        string source = JsonText(donation, "source");
+        if (id.StartsWith("widget-test", StringComparison.OrdinalIgnoreCase) || id.StartsWith("test-", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return IsTestLabel(provider) || IsTestLabel(source);
+    }
+
+    private bool IsTestLabel(string value)
+    {
+        string text = (value ?? "").Trim();
+        return text.Equals("Widget Test", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("Test", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("Filter test", StringComparison.OrdinalIgnoreCase);
     }
 
     private void SpeakDonationIfEnabled(JObject donation, WidgetSettings settings)
@@ -6299,6 +6716,9 @@ public class DonConnectWidgetServer
             case "/donconnect/dock":
                 WriteResponse(stream, 200, "text/html; charset=utf-8", DockHtml());
                 return true;
+            case "/donconnect/api/ping":
+                WriteJson(stream, PingEndpointJson());
+                return true;
             case "/donconnect/api/settings":
                 WriteJson(stream, CurrentSettings.ToJson());
                 return true;
@@ -6355,6 +6775,12 @@ public class DonConnectWidgetServer
         if (path.StartsWith("/donconnect/media/", StringComparison.OrdinalIgnoreCase))
         {
             ServeAlertMedia(stream, path.Substring("/donconnect/media/".Length));
+            return true;
+        }
+
+        if (path.StartsWith("/donconnect/font/", StringComparison.OrdinalIgnoreCase))
+        {
+            ServeLocalFont(stream, path.Substring("/donconnect/font/".Length));
             return true;
         }
 
@@ -6416,6 +6842,9 @@ public class DonConnectWidgetServer
             case "/donconnect/api/credits-test":
                 CreditsTestEndpoint(stream);
                 return true;
+            case "/donconnect/api/credits-reset":
+                ResetCreditsEndpoint(stream);
+                return true;
             case "/donconnect/api/alert-media-upload":
                 UploadAlertMediaEndpoint(stream, body);
                 return true;
@@ -6425,9 +6854,20 @@ public class DonConnectWidgetServer
             case "/donconnect/api/alert-media-open":
                 OpenAlertMediaEndpoint(stream);
                 return true;
+            case "/donconnect/api/donation-logs-open":
+                OpenDonationLogsEndpoint(stream);
+                return true;
             default:
                 return false;
         }
+    }
+
+    private JObject PingEndpointJson()
+    {
+        var result = new JObject();
+        result["ok"] = true;
+        result["version"] = EditorVersion;
+        return result;
     }
 
     private static string NormalizeHttpMethod(string method)
@@ -6532,13 +6972,7 @@ public class DonConnectWidgetServer
 
         UnifiedDonationEvent test = CreateTestDonation(kind);
         ApplyCustomTestDonation(test, custom);
-        if (DonationHandler != null)
-            DonationHandler(test);
-        else
-        {
-            ApplyTestDonationToGoalTimer(test);
-            PushDonation(test);
-        }
+        PushDonation(test, false);
         LatestEndpoint(stream);
     }
 
@@ -6750,6 +7184,78 @@ public class DonConnectWidgetServer
         WriteJson(stream, result);
     }
 
+    public bool ResetCreditsInfo()
+    {
+        return ResetCreditsState();
+    }
+
+    public bool ResetStreamSessionInfo()
+    {
+        string todayKey;
+        string previousKey;
+        if (!ShouldRunPeriodReset("streamSession", out todayKey, out previousKey))
+        {
+            Logger.Info("Stream session reset skipped: credits and leaderboard were already reset today (" + todayKey + ").");
+            return true;
+        }
+
+        bool creditsOk = ResetCreditsState();
+        if (!creditsOk)
+        {
+            Logger.Warn("Stream session reset stopped: Streamer.bot Credits were not cleared, so leaderboard was not cleared either.");
+            return false;
+        }
+
+        ResetLeaderboardState();
+        MarkPeriodReset("streamSession", todayKey);
+        Logger.Info("Stream session reset completed: credits and leaderboard cleared for " + todayKey + ".");
+        return true;
+    }
+
+    private void ResetCreditsEndpoint(NetworkStream stream)
+    {
+        bool streamerBotCleared = ResetCreditsState();
+        int eventId;
+        lock (StateLock)
+            eventId = CreditsEventId;
+        JObject result = new JObject();
+        result["ok"] = streamerBotCleared;
+        result["streamerBotCleared"] = streamerBotCleared;
+        result["eventId"] = eventId;
+        if (!streamerBotCleared)
+            result["error"] = "Streamer.bot HTTP Server did not answer /ClearCredits.";
+        WriteJson(stream, result);
+    }
+
+    private bool ResetCreditsState()
+    {
+        bool streamerBotCleared = ClearStreamerBotCreditsViaHttp();
+        if (!streamerBotCleared)
+            return false;
+
+        lock (StateLock)
+        {
+            CreditItems.Clear();
+            CreditsTestMode = false;
+            CreditsEventId++;
+        }
+
+        lock (NativeCreditsLock)
+        {
+            NativeCreditsCache = null;
+            NativeCreditsCachePath = "";
+            NativeCreditsCacheWriteUtc = DateTime.MinValue;
+            NativeCreditsLastHttpAttemptUtc = DateTime.MinValue;
+            NativeCreditsIgnoreFileUntilUtc = DateTime.UtcNow.AddSeconds(streamerBotCleared ? 60 : 10);
+            NativeCreditsHttpRefreshPending = 0;
+        }
+
+        if (streamerBotCleared)
+            RequestNativeCreditsFromHttp(false, 1200);
+
+        return streamerBotCleared;
+    }
+
     private JObject TryLoadNativeCredits()
     {
         JObject local = TryLoadNativeCreditsCacheFile();
@@ -6777,64 +7283,75 @@ public class DonConnectWidgetServer
         if (credits == null)
             return result;
 
-        HashSet<int> eventIndexes = JsonIntSet(credits["creditEvents"]);
-        HashSet<int> roleIndexes = JsonIntSet(credits["rolesPresent"]);
-        HashSet<int> topIndexes = JsonIntSet(credits["topEvents"]);
-
-        JObject events = ChildObject(result, "Events", "events");
-        RemoveDisabledCreditsSections(events, eventIndexes, new[]
+        JArray creditEvents = credits["creditEvents"] as JArray;
+        if (creditEvents != null)
         {
-            new CreditsSectionIndex(0, "Follows", "follows"),
-            new CreditsSectionIndex(1, "Cheers", "cheers"),
-            new CreditsSectionIndex(2, "Subs", "subs"),
-            new CreditsSectionIndex(3, "ReSubs", "ReSub", "resubs", "reSubs"),
-            new CreditsSectionIndex(4, "GiftSubs", "giftsubs", "giftSubs"),
-            new CreditsSectionIndex(5, "GiftBombs", "giftbombs", "giftBombs"),
-            new CreditsSectionIndex(6, "Raided", "Raids", "raided", "raids"),
-            new CreditsSectionIndex(7, "RewardRedemptions", "rewardredemptions", "rewardRedemptions"),
-            new CreditsSectionIndex(8, "GoalContributions", "goalcontributions", "goalContributions"),
-            new CreditsSectionIndex(9, "GameUpdates", "gameupdates", "gameUpdates"),
-            new CreditsSectionIndex(10, "Pyramids", "pyramids"),
-            new CreditsSectionIndex(11, "HypeTrains", "hypetrains", "hypeTrains")
-        });
+            HashSet<int> eventIndexes = JsonIntSet(creditEvents);
+            JObject events = ChildObject(result, "Events", "events");
+            RemoveDisabledCreditsSections(events, eventIndexes, new[]
+            {
+                new CreditsSectionIndex(0, "Follows", "follows"),
+                new CreditsSectionIndex(1, "Cheers", "cheers"),
+                new CreditsSectionIndex(2, "Subs", "subs"),
+                new CreditsSectionIndex(3, "ReSubs", "ReSub", "resubs", "reSubs"),
+                new CreditsSectionIndex(4, "GiftSubs", "giftsubs", "giftSubs"),
+                new CreditsSectionIndex(5, "GiftBombs", "giftbombs", "giftBombs"),
+                new CreditsSectionIndex(6, "Raided", "Raids", "raided", "raids"),
+                new CreditsSectionIndex(7, "RewardRedemptions", "rewardredemptions", "rewardRedemptions"),
+                new CreditsSectionIndex(8, "GoalContributions", "goalcontributions", "goalContributions"),
+                new CreditsSectionIndex(9, "GameUpdates", "gameupdates", "gameUpdates"),
+                new CreditsSectionIndex(10, "Pyramids", "pyramids"),
+                new CreditsSectionIndex(11, "HypeTrains", "hypetrains", "hypeTrains")
+            });
 
-        if (!eventIndexes.Contains(11))
-        {
-            RemoveProperties(result, "HypeTrainConductor", "hypeTrainConductors", "HypeTrainContributors", "hypeTrainContributors");
-            RemoveProperties(ChildObject(result, "HypeTrain", "hypeTrain"), "Conductors", "conductors", "Contributors", "contributors");
+            if (!eventIndexes.Contains(11))
+            {
+                RemoveProperties(result, "HypeTrainConductor", "hypeTrainConductors", "HypeTrainContributors", "hypeTrainContributors");
+                RemoveProperties(ChildObject(result, "HypeTrain", "hypeTrain"), "Conductors", "conductors", "Contributors", "contributors");
+            }
         }
 
-        JObject users = ChildObject(result, "User", "Users", "user", "users");
-        RemoveDisabledCreditsSections(users, roleIndexes, new[]
+        JArray rolesPresent = credits["rolesPresent"] as JArray;
+        if (rolesPresent != null)
         {
-            new CreditsSectionIndex(0, "Editors", "editors"),
-            new CreditsSectionIndex(1, "Moderator", "Moderators", "moderator", "moderators"),
-            new CreditsSectionIndex(2, "Subscriber", "Subscribers", "subscriber", "subscribers"),
-            new CreditsSectionIndex(3, "VIPs", "Vips", "vips"),
-            new CreditsSectionIndex(4, "Users", "users", "regulars")
-        });
+            HashSet<int> roleIndexes = JsonIntSet(rolesPresent);
+            JObject users = ChildObject(result, "User", "Users", "user", "users");
+            RemoveDisabledCreditsSections(users, roleIndexes, new[]
+            {
+                new CreditsSectionIndex(0, "Editors", "editors"),
+                new CreditsSectionIndex(1, "Moderator", "Moderators", "moderator", "moderators"),
+                new CreditsSectionIndex(2, "Subscriber", "Subscribers", "subscriber", "subscribers"),
+                new CreditsSectionIndex(3, "VIPs", "Vips", "vips"),
+                new CreditsSectionIndex(4, "Users", "users", "regulars")
+            });
+        }
 
-        JObject top = ChildObject(result, "Top", "top");
-        RemoveDisabledCreditsSections(top, topIndexes, new[]
+        JArray topEvents = credits["topEvents"] as JArray;
+        if (topEvents != null)
         {
-            new CreditsSectionIndex(0, "allBits", "AllBits"),
-            new CreditsSectionIndex(1, "monthBits", "MonthBits"),
-            new CreditsSectionIndex(2, "weekBits", "WeekBits"),
-            new CreditsSectionIndex(3, "channelRewards", "ChannelRewards")
-        });
+            HashSet<int> topIndexes = JsonIntSet(topEvents);
+            JObject top = ChildObject(result, "Top", "top");
+            RemoveDisabledCreditsSections(top, topIndexes, new[]
+            {
+                new CreditsSectionIndex(0, "allBits", "AllBits"),
+                new CreditsSectionIndex(1, "monthBits", "MonthBits"),
+                new CreditsSectionIndex(2, "weekBits", "WeekBits"),
+                new CreditsSectionIndex(3, "channelRewards", "ChannelRewards")
+            });
 
-        JObject topBits = ChildObject(result, "TopBits", "topBits");
-        RemoveDisabledCreditsSections(topBits, topIndexes, new[]
-        {
-            new CreditsSectionIndex(0, "All", "all"),
-            new CreditsSectionIndex(1, "Month", "month"),
-            new CreditsSectionIndex(2, "Week", "week")
-        });
-        if (!topIndexes.Contains(3))
-            RemoveProperties(result, "TopChannelRewards", "topChannelRewards");
+            JObject topBits = ChildObject(result, "TopBits", "topBits");
+            RemoveDisabledCreditsSections(topBits, topIndexes, new[]
+            {
+                new CreditsSectionIndex(0, "All", "all"),
+                new CreditsSectionIndex(1, "Month", "month"),
+                new CreditsSectionIndex(2, "Week", "week")
+            });
+            if (!topIndexes.Contains(3))
+                RemoveProperties(result, "TopChannelRewards", "topChannelRewards");
+        }
 
         JArray enabledGroups = credits["groupPresent"] as JArray;
-        if (enabledGroups == null || enabledGroups.Count == 0)
+        if (enabledGroups != null && enabledGroups.Count == 0)
             RemoveProperties(result, "Groups", "groups");
 
         return result;
@@ -6866,6 +7383,14 @@ public class DonConnectWidgetServer
         var paths = new List<string>();
         AddUniquePath(paths, Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "settings.json"));
         AddUniquePath(paths, Path.Combine(Environment.CurrentDirectory, "data", "settings.json"));
+        try
+        {
+            string processPath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+            string processDirectory = string.IsNullOrWhiteSpace(processPath) ? "" : Path.GetDirectoryName(processPath);
+            if (!string.IsNullOrWhiteSpace(processDirectory))
+                AddUniquePath(paths, Path.Combine(processDirectory, "data", "settings.json"));
+        }
+        catch { }
         string dataDirectory = SettingsDirectory();
         DirectoryInfo parent = string.IsNullOrWhiteSpace(dataDirectory) ? null : Directory.GetParent(dataDirectory);
         if (parent != null)
@@ -6944,15 +7469,91 @@ public class DonConnectWidgetServer
         bundle["CreditsSettings"] = CreditsSettingsForClient();
         bundle["LeaderboardSettings"] = LeaderboardSettingsForClient();
         bundle["ContentFilterSettings"] = ContentFilterSettingsForClient();
+        JArray alertMedia = AlertMediaExportBundle(CurrentSettings);
+        bundle["AlertMediaFiles"] = alertMedia;
         bundle["IncludesProviderSecrets"] = false;
-        bundle["IncludesMediaFiles"] = false;
+        bundle["IncludesMediaFiles"] = alertMedia.Count > 0 || HasEmbeddedOverlayMedia(bundle["OverlaySettings"] as JObject);
         return bundle;
+    }
+
+    private bool HasEmbeddedOverlayMedia(JObject overlay)
+    {
+        if (overlay == null)
+            return false;
+        return !string.IsNullOrWhiteSpace(JsonText(overlay, "GoalImageDataUrl")) || !string.IsNullOrWhiteSpace(JsonText(overlay, "DecorImageDataUrl"));
+    }
+
+    private JArray AlertMediaExportBundle(WidgetSettings settings)
+    {
+        var result = new JArray();
+        if (settings == null)
+            return result;
+
+        var files = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddAlertMediaReference(files, settings.MediaFile);
+        AddAlertMediaReference(files, settings.DecorImageFile);
+        AddAlertMediaReference(files, settings.SoundFile);
+        AddAlertMediaReference(files, settings.TextSoundFile);
+        AddAlertMediaReference(files, JsonText(LeaderboardSettingsForClient(), "DecorImageFile"));
+        if (settings.AlertRules != null)
+        {
+            foreach (JObject rule in settings.AlertRules.OfType<JObject>())
+            {
+                AddAlertMediaReferences(files, rule["MediaFiles"] as JArray);
+                AddAlertMediaReferences(files, rule["SoundFiles"] as JArray);
+            }
+        }
+
+        foreach (string relative in files)
+        {
+            try
+            {
+                string path = ResolveAlertMediaPath(relative);
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || !IsAllowedMediaExtension(Path.GetExtension(path)))
+                    continue;
+                var info = new FileInfo(path);
+                if (info.Length <= 0 || info.Length > MaxAlertMediaBytes)
+                    continue;
+
+                byte[] bytes = File.ReadAllBytes(path);
+                var item = new JObject();
+                item["file"] = relative;
+                item["name"] = Path.GetFileName(relative);
+                item["kind"] = AlertMediaKind(Path.GetExtension(path));
+                item["bytes"] = bytes.Length;
+                item["contentType"] = AlertMediaContentType(Path.GetExtension(path));
+                item["data"] = "data:" + AlertMediaContentType(Path.GetExtension(path)) + ";base64," + Convert.ToBase64String(bytes);
+                result.Add(item);
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug("Alert media file was skipped during profile export: " + relative + ". " + ex.Message);
+            }
+        }
+        return result;
+    }
+
+    private void AddAlertMediaReference(SortedSet<string> files, string relative)
+    {
+        string value = (relative ?? "").Replace('\\', '/').Trim('/');
+        if (!string.IsNullOrWhiteSpace(value))
+            files.Add(value);
+    }
+
+    private void AddAlertMediaReferences(SortedSet<string> files, JArray values)
+    {
+        if (values == null)
+            return;
+        foreach (JToken token in values)
+            AddAlertMediaReference(files, token == null ? "" : token.ToString());
     }
 
     private JObject ProviderSettingsForClient()
     {
         var result = new JObject();
-        result["donationalerts"] = ProviderClientState("donationalerts", "accessToken");
+        JObject donationAlerts = ProviderClientState("donationalerts", "accessToken", "clientId", "clientSecret");
+        donationAlerts["authMode"] = "own";
+        result["donationalerts"] = donationAlerts;
         result["streamelements"] = ProviderClientState("streamelements", "accountId", "jwtToken");
         result["streamlabs"] = ProviderClientState("streamlabs", "token");
         result["donatepayru"] = ProviderClientState("donatepayru", "apiKey");
@@ -6983,7 +7584,7 @@ public class DonConnectWidgetServer
         {
             JObject root = string.IsNullOrWhiteSpace(body) ? new JObject() : JObject.Parse(body);
             JObject providers = root["providers"] as JObject ?? root;
-            SaveProviderInput(providers, "donationalerts", "accessToken");
+            SaveProviderInput(providers, "donationalerts", "accessToken", "clientId", "clientSecret");
             SaveProviderInput(providers, "streamelements", "accountId", "jwtToken");
             SaveProviderInput(providers, "streamlabs", "token");
             SaveProviderInput(providers, "donatepayru", "apiKey");
@@ -6998,6 +7599,11 @@ public class DonConnectWidgetServer
             BridgeSettings.Set("donatepayeu.apiHost", "https://donatepay.eu", true);
             BridgeSettings.Set("donatex.apiBase", BridgeSettings.Get("donatex.apiBase", "https://donatex.gg/api"), true);
             BridgeSettings.Set("oda.apiBase", BridgeSettings.Get("oda.apiBase", "https://api.oda.digital"), true);
+            BridgeSettings.Set("donationalerts.authMode", "own", true);
+            if (BridgeSettings.GetBool("donationalerts.enabled", false)
+                && (string.IsNullOrWhiteSpace(BridgeSettings.Get("donationalerts.clientId", ""))
+                    || string.IsNullOrWhiteSpace(BridgeSettings.Get("donationalerts.clientSecret", ""))))
+                throw new InvalidOperationException("DonationAlerts: сначала создайте приложение и вставьте Client ID + Client Secret.");
 
             WriteJson(stream, ProviderSettingsForClient());
             RestartProvidersInBackground();
@@ -7032,7 +7638,13 @@ public class DonConnectWidgetServer
     {
         try
         {
-            BridgeSettings.Set("donationalerts.authMode", "shared", true);
+            BridgeSettings.Set("donationalerts.authMode", "own", true);
+            if (string.IsNullOrWhiteSpace(BridgeSettings.Get("donationalerts.clientId", ""))
+                || string.IsNullOrWhiteSpace(BridgeSettings.Get("donationalerts.clientSecret", "")))
+            {
+                throw new InvalidOperationException("Сначала создайте приложение DonationAlerts и вставьте Client ID + Client Secret в DonConnect.");
+            }
+
             BridgeSettings.Set("donationalerts.enabled", "true", true);
             bool ok = DonationAlertsAuthorizer != null && DonationAlertsAuthorizer();
             if (ok)
@@ -7079,10 +7691,13 @@ public class DonConnectWidgetServer
             JObject credits = bundle["CreditsSettings"] as JObject;
             JObject leaderboard = bundle["LeaderboardSettings"] as JObject;
             JObject filter = bundle["ContentFilterSettings"] as JObject;
+            Dictionary<string, string> importedMedia = ImportAlertMediaFiles(bundle["AlertMediaFiles"] as JArray);
 
             if (widget != null)
             {
-                CurrentSettings = WidgetSettings.FromJson(widget.ToString(Formatting.None));
+                WidgetSettings importedSettings = WidgetSettings.FromJson(widget.ToString(Formatting.None));
+                RemapAlertMediaReferences(importedSettings, importedMedia);
+                CurrentSettings = importedSettings;
                 SaveSettings(CurrentSettings);
             }
             if (overlay != null)
@@ -7100,6 +7715,8 @@ public class DonConnectWidgetServer
             if (leaderboard != null)
             {
                 LeaderboardSettings = NormalizeLeaderboardSettings(leaderboard.ToString(Formatting.None));
+                if (importedMedia != null && importedMedia.Count > 0)
+                    LeaderboardSettings["DecorImageFile"] = RemapAlertMediaReference(JsonText(LeaderboardSettings, "DecorImageFile"), importedMedia);
                 SaveLeaderboardSettings(LeaderboardSettings);
             }
             if (filter != null)
@@ -7118,8 +7735,144 @@ public class DonConnectWidgetServer
         }
     }
 
+
+    private Dictionary<string, string> ImportAlertMediaFiles(JArray files)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (files == null || files.Count == 0)
+            return map;
+
+        foreach (JObject item in files.OfType<JObject>())
+        {
+            try
+            {
+                string original = SanitizeAlertMediaRelative(JsonText(item, "file"), JsonText(item, "name"));
+                string data = JsonText(item, "data");
+                int comma = data.IndexOf(',');
+                if (comma >= 0)
+                    data = data.Substring(comma + 1);
+                byte[] bytes = Convert.FromBase64String(data);
+                if (bytes.Length == 0 || bytes.Length > MaxAlertMediaBytes)
+                    continue;
+                if (!IsAllowedMediaExtension(Path.GetExtension(original)))
+                    continue;
+
+                string relative = original;
+                string target = ResolveAlertMediaPath(relative);
+                if (string.IsNullOrWhiteSpace(target))
+                    continue;
+
+                if (File.Exists(target))
+                {
+                    byte[] existing = File.ReadAllBytes(target);
+                    if (!existing.SequenceEqual(bytes))
+                    {
+                        relative = UniqueAlertMediaRelativePath(relative);
+                        target = ResolveAlertMediaPath(relative);
+                    }
+                }
+
+                string directory = Path.GetDirectoryName(target);
+                if (!string.IsNullOrWhiteSpace(directory) && !Directory.Exists(directory))
+                    Directory.CreateDirectory(directory);
+                if (!File.Exists(target) || !File.ReadAllBytes(target).SequenceEqual(bytes))
+                    File.WriteAllBytes(target, bytes);
+                map[original] = relative;
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug("Alert media file was skipped during profile import. " + ex.Message);
+            }
+        }
+        return map;
+    }
+
+    private string SanitizeAlertMediaRelative(string relative, string fallbackName)
+    {
+        string value = (relative ?? "").Replace('\\', '/').Trim('/');
+        if (string.IsNullOrWhiteSpace(value))
+            value = SanitizeAlertMediaName(fallbackName);
+        string[] parts = value.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+        var safe = new List<string>();
+        foreach (string part in parts)
+        {
+            string clean = SanitizeAlertMediaName(part);
+            if (!string.IsNullOrWhiteSpace(clean))
+                safe.Add(clean);
+        }
+        if (safe.Count == 0)
+            safe.Add("alert-media.bin");
+        return string.Join("/", safe.ToArray());
+    }
+
+    private string UniqueAlertMediaRelativePath(string relative)
+    {
+        string normalized = (relative ?? "").Replace('\\', '/').Trim('/');
+        string directory = "";
+        string fileName = normalized;
+        int slash = normalized.LastIndexOf('/');
+        if (slash >= 0)
+        {
+            directory = normalized.Substring(0, slash);
+            fileName = normalized.Substring(slash + 1);
+        }
+        string stem = Path.GetFileNameWithoutExtension(fileName);
+        string extension = Path.GetExtension(fileName);
+        for (int i = 1; i < 1000; i++)
+        {
+            string candidateName = stem + "-" + i.ToString(CultureInfo.InvariantCulture) + extension;
+            string candidate = string.IsNullOrWhiteSpace(directory) ? candidateName : directory + "/" + candidateName;
+            string path = ResolveAlertMediaPath(candidate);
+            if (!string.IsNullOrWhiteSpace(path) && !File.Exists(path))
+                return candidate;
+        }
+        string fallbackName = stem + "-" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture) + extension;
+        return string.IsNullOrWhiteSpace(directory) ? fallbackName : directory + "/" + fallbackName;
+    }
+
+    private void RemapAlertMediaReferences(WidgetSettings settings, Dictionary<string, string> map)
+    {
+        if (settings == null || map == null || map.Count == 0)
+            return;
+        settings.MediaFile = RemapAlertMediaReference(settings.MediaFile, map);
+        settings.DecorImageFile = RemapAlertMediaReference(settings.DecorImageFile, map);
+        settings.SoundFile = RemapAlertMediaReference(settings.SoundFile, map);
+        settings.TextSoundFile = RemapAlertMediaReference(settings.TextSoundFile, map);
+        if (settings.AlertRules == null)
+            return;
+        foreach (JObject rule in settings.AlertRules.OfType<JObject>())
+        {
+            RemapAlertMediaArray(rule["MediaFiles"] as JArray, map);
+            RemapAlertMediaArray(rule["SoundFiles"] as JArray, map);
+        }
+    }
+
+    private string RemapAlertMediaReference(string value, Dictionary<string, string> map)
+    {
+        string key = (value ?? "").Replace('\\', '/').Trim('/');
+        string replacement;
+        return !string.IsNullOrWhiteSpace(key) && map.TryGetValue(key, out replacement) ? replacement : value;
+    }
+
+    private void RemapAlertMediaArray(JArray array, Dictionary<string, string> map)
+    {
+        if (array == null)
+            return;
+        for (int i = 0; i < array.Count; i++)
+        {
+            string replacement = RemapAlertMediaReference(array[i] == null ? "" : array[i].ToString(), map);
+            array[i] = replacement;
+        }
+    }
+
     private JObject TryLoadNativeCreditsCacheFile()
     {
+        lock (NativeCreditsLock)
+        {
+            if (DateTime.UtcNow < NativeCreditsIgnoreFileUntilUtc)
+                return null;
+        }
+
         foreach (string path in NativeCreditsCachePaths())
         {
             try
@@ -7157,6 +7910,30 @@ public class DonConnectWidgetServer
         }
 
         return null;
+    }
+
+    private bool ClearStreamerBotCreditsViaHttp()
+    {
+        try
+        {
+            string baseUrl = BridgeSettings.Get("STREAMERBOT_HTTP_URL", "http://127.0.0.1:7474").Trim().TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                return false;
+
+            var request = (HttpWebRequest)WebRequest.Create(baseUrl + "/ClearCredits");
+            request.Method = "GET";
+            request.Timeout = 1200;
+            request.ReadWriteTimeout = 1200;
+            request.KeepAlive = false;
+            request.Proxy = null;
+            using (var response = (HttpWebResponse)request.GetResponse())
+                return (int)response.StatusCode >= 200 && (int)response.StatusCode < 300;
+        }
+        catch (Exception ex)
+        {
+            Logger.Debug("Streamer.bot Credits reset did not answer: " + ex.Message);
+            return false;
+        }
     }
 
     private IEnumerable<string> NativeCreditsCachePaths()
@@ -7264,13 +8041,18 @@ public class DonConnectWidgetServer
 
     private void ResetLeaderboardEndpoint(NetworkStream stream)
     {
+        ResetLeaderboardState();
+        LeaderboardStateEndpoint(stream);
+    }
+
+    private void ResetLeaderboardState()
+    {
         lock (StateLock)
         {
             LeaderboardItems.Clear();
             LeaderboardEventId++;
             SaveLeaderboardData();
         }
-        LeaderboardStateEndpoint(stream);
     }
 
     private void LeaderboardEntryEndpoint(NetworkStream stream, string body)
@@ -7331,6 +8113,7 @@ public class DonConnectWidgetServer
         result["dockUrl"] = DockUrl;
         result["settingsPath"] = SettingsPath();
         result["alertMediaDirectory"] = AlertMediaDirectory();
+        result["donationLogsDirectory"] = DonationLogsDirectory();
         result["network"] = "127.0.0.1 only";
         WriteJson(stream, result);
     }
@@ -7354,6 +8137,7 @@ public class DonConnectWidgetServer
         JObject json = new JObject();
         json["windows"] = InstalledWindowsFonts();
         json["google"] = GoogleFontNames();
+        json["localCss"] = LocalFontFaceCss();
         return json;
     }
 
@@ -7418,6 +8202,13 @@ public class DonConnectWidgetServer
                 string name = CleanFontName(valueName);
                 if (!string.IsNullOrWhiteSpace(name))
                     fonts.Add(name);
+                string path = ResolveRegistryFontPath(Convert.ToString(key.GetValue(valueName), CultureInfo.InvariantCulture));
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    string fileName = CleanFontName(Path.GetFileNameWithoutExtension(path));
+                    if (!string.IsNullOrWhiteSpace(fileName))
+                        fonts.Add(fileName);
+                }
             }
         }
     }
@@ -7460,17 +8251,168 @@ public class DonConnectWidgetServer
 
     private string CleanFontName(string valueName)
     {
-        string name = valueName ?? "";
+        string name = (valueName ?? "").Trim();
+        while (name.Length > 0 && !char.IsLetterOrDigit(name[0]))
+            name = name.Substring(1).TrimStart();
         int index = name.IndexOf(" (", StringComparison.Ordinal);
         if (index > 0)
             name = name.Substring(0, index);
-        name = name.Replace(" Regular", "").Trim();
+        string[] suffixes = { " Regular", "-Regular", "_Regular", " Book", "-Book", "_Book", " Roman", "-Roman", "_Roman" };
+        foreach (string suffix in suffixes)
+            if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                name = name.Substring(0, name.Length - suffix.Length);
+        name = name.Trim();
         return name;
+    }
+
+
+    private string LocalFontFaceCss()
+    {
+        var builder = new StringBuilder();
+        var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (FontFileEntry entry in InstalledFontFileEntries())
+        {
+            if (entry == null || string.IsNullOrWhiteSpace(entry.Name) || string.IsNullOrWhiteSpace(entry.Path))
+                continue;
+            string key = entry.Name + "|" + entry.Path;
+            if (!emitted.Add(key))
+                continue;
+            builder.Append("@font-face{font-family:")
+                .Append(CssQuoted(entry.Name))
+                .Append(";src:url('/donconnect/font/")
+                .Append(EncodeMediaPath(entry.Name))
+                .Append("') format('")
+                .Append(FontCssFormat(Path.GetExtension(entry.Path)))
+                .Append("');font-display:swap;}\n");
+        }
+        return builder.ToString();
+    }
+
+    private List<FontFileEntry> InstalledFontFileEntries()
+    {
+        var entries = new List<FontFileEntry>();
+        try
+        {
+            AddRegistryFontFiles(entries, Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"));
+            AddRegistryFontFiles(entries, Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"));
+        }
+        catch { }
+        return entries;
+    }
+
+    private void AddRegistryFontFiles(List<FontFileEntry> entries, Microsoft.Win32.RegistryKey key)
+    {
+        if (key == null)
+            return;
+        using (key)
+        {
+            foreach (string valueName in key.GetValueNames())
+            {
+                string path = ResolveRegistryFontPath(Convert.ToString(key.GetValue(valueName), CultureInfo.InvariantCulture));
+                if (string.IsNullOrWhiteSpace(path) || !IsAllowedFontExtension(Path.GetExtension(path)))
+                    continue;
+                AddFontFileEntry(entries, CleanFontName(valueName), path);
+                AddFontFileEntry(entries, CleanFontName(Path.GetFileNameWithoutExtension(path)), path);
+                string stem = Path.GetFileNameWithoutExtension(path);
+                if (!string.IsNullOrWhiteSpace(stem))
+                    AddFontFileEntry(entries, stem.Trim(), path);
+            }
+        }
+    }
+
+    private void AddFontFileEntry(List<FontFileEntry> entries, string name, string path)
+    {
+        name = CleanFontName(name);
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(path))
+            return;
+        foreach (FontFileEntry entry in entries)
+            if (entry.Name.Equals(name, StringComparison.OrdinalIgnoreCase) && entry.Path.Equals(path, StringComparison.OrdinalIgnoreCase))
+                return;
+        entries.Add(new FontFileEntry { Name = name, Path = path });
+    }
+
+    private string ResolveRegistryFontPath(string value)
+    {
+        string raw = (value ?? "").Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(raw))
+            return "";
+        string path = raw;
+        if (!Path.IsPathRooted(path))
+            path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Fonts), path);
+        path = Path.GetFullPath(path);
+        if (!File.Exists(path) || !IsAllowedFontExtension(Path.GetExtension(path)))
+            return "";
+        return path;
+    }
+
+    private void ServeLocalFont(NetworkStream stream, string encodedName)
+    {
+        try
+        {
+            string name = Uri.UnescapeDataString(encodedName ?? "");
+            string path = "";
+            foreach (FontFileEntry entry in InstalledFontFileEntries())
+            {
+                if (entry.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    path = entry.Path;
+                    break;
+                }
+            }
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path) || !IsAllowedFontExtension(Path.GetExtension(path)))
+            {
+                WriteResponse(stream, 404, "text/plain; charset=utf-8", "Not Found");
+                return;
+            }
+            WriteBinaryResponse(stream, 200, FontContentType(Path.GetExtension(path)), File.ReadAllBytes(path));
+        }
+        catch
+        {
+            WriteResponse(stream, 404, "text/plain; charset=utf-8", "Not Found");
+        }
+    }
+
+    private bool IsAllowedFontExtension(string extension)
+    {
+        string value = (extension ?? "").Trim().ToLowerInvariant();
+        return value == ".ttf" || value == ".otf" || value == ".ttc";
+    }
+
+    private string FontContentType(string extension)
+    {
+        string value = (extension ?? "").Trim().ToLowerInvariant();
+        if (value == ".otf") return "font/otf";
+        if (value == ".ttc") return "font/collection";
+        return "font/ttf";
+    }
+
+    private string FontCssFormat(string extension)
+    {
+        string value = (extension ?? "").Trim().ToLowerInvariant();
+        if (value == ".otf") return "opentype";
+        if (value == ".ttc") return "truetype-collection";
+        return "truetype";
+    }
+
+    private string CssQuoted(string value)
+    {
+        return "'" + (value ?? "").Replace("\\", "\\\\").Replace("'", "\\'") + "'";
+    }
+
+    private sealed class FontFileEntry
+    {
+        public string Name;
+        public string Path;
     }
 
     private string AlertMediaDirectory()
     {
         return Path.Combine(SettingsDirectory(), "alert-media");
+    }
+
+    private string DonationLogsDirectory()
+    {
+        return Path.Combine(SettingsDirectory(), "donation-logs");
     }
 
     private void EnsureAlertMediaLibrary()
@@ -7655,6 +8597,25 @@ public class DonConnectWidgetServer
         catch (Exception ex)
         {
             WriteError(stream, 400, "Alert media directory was not opened: " + ex.Message);
+        }
+    }
+
+    private void OpenDonationLogsEndpoint(NetworkStream stream)
+    {
+        try
+        {
+            string directory = DonationLogsDirectory();
+            if (!Directory.Exists(directory))
+                Directory.CreateDirectory(directory);
+            DonConnectShell.OpenDirectory(directory);
+            var result = new JObject();
+            result["ok"] = true;
+            result["directory"] = directory;
+            WriteJson(stream, result);
+        }
+        catch (Exception ex)
+        {
+            WriteError(stream, 400, "Donation log directory was not opened: " + ex.Message);
         }
     }
 
@@ -8100,9 +9061,65 @@ public class DonConnectWidgetServer
         }
     }
 
+    private void ResetLeaderboardForSessionIfNeeded()
+    {
+        if (!JsonBool(LeaderboardSettings, "ResetOnStart", false))
+            return;
+
+        string todayKey;
+        string previousKey;
+        if (!ShouldRunPeriodReset("leaderboardAutoReset", out todayKey, out previousKey))
+        {
+            Logger.Info("Leaderboard auto-reset skipped: it was already reset today (" + todayKey + ").");
+            return;
+        }
+
+        ResetLeaderboardState();
+        MarkPeriodReset("leaderboardAutoReset", todayKey);
+        Logger.Info("Leaderboard auto-reset completed for " + todayKey + ".");
+    }
+
+    private bool ShouldRunPeriodReset(string scope, out string todayKey, out string previousKey)
+    {
+        todayKey = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        previousKey = BridgeSettings.Get("donconnect." + scope + ".lastLocalDate", "");
+        return !previousKey.Equals(todayKey, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void MarkPeriodReset(string scope, string todayKey)
+    {
+        BridgeSettings.Set("donconnect." + scope + ".lastLocalDate", todayKey ?? "", true);
+        BridgeSettings.Set("donconnect." + scope + ".lastResetAtUtc", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), true);
+    }
+
     private JObject OverlaySettingsForClient()
     {
-        return OverlaySettings == null ? DefaultOverlaySettings() : (JObject)OverlaySettings.DeepClone();
+        JObject settings = OverlaySettings == null ? DefaultOverlaySettings() : (JObject)OverlaySettings.DeepClone();
+        AutoDisableExpiredGoalDeadline(settings);
+        return settings;
+    }
+
+    private void AutoDisableExpiredGoalDeadline(JObject settings)
+    {
+        if (settings == null || !JsonBool(settings, "GoalDeadlineEnabled", false))
+            return;
+
+        string raw = JsonText(settings, "GoalDeadlineEndsAt", "");
+        if (string.IsNullOrWhiteSpace(raw))
+            return;
+
+        DateTime endsAt;
+        if (!DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out endsAt) &&
+            !DateTime.TryParse(raw, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out endsAt))
+            return;
+
+        DateTime localEndsAt = endsAt.Kind == DateTimeKind.Utc ? endsAt.ToLocalTime() : endsAt;
+        if (localEndsAt > DateTime.Now)
+            return;
+
+        settings["GoalDeadlineEnabled"] = false;
+        OverlaySettings = (JObject)settings.DeepClone();
+        SaveOverlaySettings(OverlaySettings);
     }
 
     private JObject CreditsSettingsForClient()
@@ -8180,6 +9197,19 @@ public class DonConnectWidgetServer
         json["GoalCurrent"] = "0";
         json["GoalTarget"] = "10000";
         json["GoalCurrency"] = "RUB";
+        json["GoalDeadlineEnabled"] = false;
+        json["GoalDeadlineTitle"] = "Сбор закончится через";
+        json["GoalDeadlineEndsAt"] = "";
+        json["GoalDeadlineExpiredText"] = "Сбор завершен";
+        json["GoalDeadlineShowDate"] = true;
+        json["GoalDeadlineFontFamily"] = "";
+        json["GoalDeadlineFontSize"] = 18;
+        json["GoalDeadlineTextAlign"] = "center";
+        json["GoalDeadlineX"] = 0;
+        json["GoalDeadlineY"] = 0;
+        json["GoalDeadlineWidth"] = 0;
+        json["GoalDeadlineHeight"] = 0;
+        json["GoalDeadlineRotation"] = 0;
         json["TimerEnabled"] = false;
         json["TimerHeaderTitle"] = "Timer";
         json["TimerTitle"] = "Timer";
@@ -8197,6 +9227,11 @@ public class DonConnectWidgetServer
         json["TimerWidth"] = 680;
         json["TimerHeight"] = 0;
         json["TimerRotation"] = 0;
+        json["TimerHeaderX"] = 0;
+        json["TimerHeaderY"] = 0;
+        json["TimerHeaderWidth"] = 0;
+        json["TimerHeaderHeight"] = 0;
+        json["TimerHeaderRotation"] = 0;
         json["TimerTitleX"] = 0;
         json["TimerTitleY"] = 0;
         json["TimerTitleWidth"] = 0;
@@ -8224,6 +9259,7 @@ public class DonConnectWidgetServer
         json["TimerConversionRotation"] = 0;
         json["TimerTextAlign"] = "center";
         json["Width"] = 920;
+        json["PanelHeight"] = 0;
         json["BorderRadius"] = 22;
         json["BarRadius"] = 22;
         json["Padding"] = 22;
@@ -8262,6 +9298,14 @@ public class DonConnectWidgetServer
         json["DecorImageWidth"] = 220;
         json["DecorImageHeight"] = 0;
         json["DecorImageRotation"] = 0;
+        json["ShowTimerDecorImage"] = false;
+        json["TimerDecorImageDataUrl"] = "";
+        json["TimerDecorImageName"] = "";
+        json["TimerDecorImageX"] = 0;
+        json["TimerDecorImageY"] = 0;
+        json["TimerDecorImageWidth"] = 220;
+        json["TimerDecorImageHeight"] = 0;
+        json["TimerDecorImageRotation"] = 0;
         json["FontFamily"] = "Segoe UI";
         json["GoalHeaderFontFamily"] = "";
         json["GoalTitleFontFamily"] = "";
@@ -8269,6 +9313,12 @@ public class DonConnectWidgetServer
         json["ServicesFontFamily"] = "";
         json["LastDonationFontFamily"] = "";
         json["TimerFontFamily"] = "";
+        json["TimerHeaderFontFamily"] = "";
+        json["TimerTitleFontFamily"] = "";
+        json["TimerSubtitleFontFamily"] = "";
+        json["TimerValueFontFamily"] = "";
+        json["TimerMetaFontFamily"] = "";
+        json["TimerConversionFontFamily"] = "";
         json["BackgroundColor"] = "#10131a";
         json["TextColor"] = "#f8fbff";
         json["MutedColor"] = "#b8c0cc";
@@ -8279,6 +9329,8 @@ public class DonConnectWidgetServer
         json["ServicesTextAlign"] = "center";
         json["ServicesFontSize"] = 14;
         json["HiddenServices"] = new JArray();
+        json["GoalLayerOrder"] = new JArray("background", "decor", "goalBar", "goalImage", "goalText", "goalMeta", "goalDeadline", "services", "last", "title");
+        json["TimerLayerOrder"] = new JArray("background", "decor", "title", "timerBlock", "timerTitle", "timerSubtitle", "timerValue", "timerMeta", "timerConversion", "services");
         json["ShowLastDonation"] = true;
         json["ShowLastDonor"] = true;
         json["ShowLastAmount"] = true;
@@ -8331,8 +9383,8 @@ public class DonConnectWidgetServer
         json["Title"] = "Thanks for watching";
         json["Subtitle"] = "Today with us";
         json["Outro"] = "See you next stream";
-        json["Duration"] = "70s";
-        json["DurationSeconds"] = 70;
+        json["Duration"] = "120s";
+        json["DurationSeconds"] = 180;
         json["LockDuration"] = false;
         json["UseNativeCredits"] = true;
         json["UseTestData"] = false;
@@ -8347,7 +9399,10 @@ public class DonConnectWidgetServer
         json["FontSize"] = 48;
         json["FontFamily"] = "Segoe UI";
         json["TitleFontFamily"] = "";
+        json["SectionTitleFontFamily"] = "";
         json["DetailFontFamily"] = "";
+        json["SectionLabels"] = DefaultWidgetCreditsLabels();
+        json["SectionFonts"] = "";
         json["TransparentBackground"] = true;
         json["BackgroundColor"] = "#000000";
         json["TextColor"] = "#f7f4ec";
@@ -8355,6 +9410,11 @@ public class DonConnectWidgetServer
         json["AccentColor"] = "#ffcf5a";
         json["ShadowColor"] = "rgba(0,0,0,0.7)";
         return json;
+    }
+
+    private string DefaultWidgetCreditsLabels()
+    {
+        return "Follows=Follows;Cheers=Cheers;Subs=Subs;ReSubs=ReSubs;Gift Subs=Gift Subs;Gift Bombs=Gift Bombs;Raids=Raids;Reward Redemptions=Reward Redemptions;Goal Contributions=Goal Contributions;Game Updates=Game Updates;Pyramids=Pyramids;Hype Trains=Hype Trains;Hype Train Conductors=Hype Train Conductors;Hype Train Contributors=Hype Train Contributors;Editors=Editors;Moderators=Moderators;Subscribers=Subscribers;VIPs=VIPs;Users=Users;Groups=Groups;All Bits=All Bits;Month Bits=Month Bits;Week Bits=Week Bits;Channel Rewards=Channel Rewards;Custom=Custom;Donations=Donations";
     }
 
     private JObject DefaultContentFilterSettings()
@@ -8375,10 +9435,20 @@ public class DonConnectWidgetServer
         json["Mode"] = "overall";
         json["TopCount"] = 5;
         json["SlideDuration"] = 5000;
+        json["SlideAnimation"] = "fade";
         json["ShowTitle"] = true;
         json["ShowRanks"] = true;
         json["ShowAmounts"] = true;
         json["ShowPlatforms"] = true;
+        json["ResetOnStart"] = false;
+        json["ShowDecorImage"] = false;
+        json["DecorImageFile"] = "";
+        json["DecorImageFit"] = "contain";
+        json["DecorImageWidth"] = 220;
+        json["DecorImageHeight"] = 160;
+        json["DecorImageX"] = 0;
+        json["DecorImageY"] = 0;
+        json["DecorImageRotation"] = 0;
         json["Width"] = 560;
         json["Padding"] = 18;
         json["BorderRadius"] = 16;
@@ -8404,6 +9474,7 @@ public class DonConnectWidgetServer
         result["Mode"] = NormalizeChoice(JsonText(result, "Mode"), "both", "goal", "timer", "both");
         result["GoalFormat"] = NormalizeChoice(JsonText(result, "GoalFormat"), "amount", "amount", "percent", "summary");
         result["Width"] = ClampInt(JsonInt(result, "Width", 720), 240, 1920);
+        result["PanelHeight"] = ClampInt(JsonInt(result, "PanelHeight", 0), 0, 1080);
         result["BorderRadius"] = ClampInt(JsonInt(result, "BorderRadius", 22), 0, 120);
         result["BarRadius"] = ClampInt(JsonInt(result, "BarRadius", JsonInt(result, "BorderRadius", 22)), 0, 120);
         result["Padding"] = ClampInt(JsonInt(result, "Padding", 22), 0, 120);
@@ -8429,6 +9500,11 @@ public class DonConnectWidgetServer
         result["DecorImageWidth"] = ClampInt(JsonInt(result, "DecorImageWidth", 220), 20, 1200);
         result["DecorImageHeight"] = ClampInt(JsonInt(result, "DecorImageHeight", 0), 0, 1000);
         result["DecorImageRotation"] = ClampInt(JsonInt(result, "DecorImageRotation", 0), -180, 180);
+        result["TimerDecorImageX"] = ClampInt(JsonInt(result, "TimerDecorImageX", 0), -800, 800);
+        result["TimerDecorImageY"] = ClampInt(JsonInt(result, "TimerDecorImageY", 0), -600, 600);
+        result["TimerDecorImageWidth"] = ClampInt(JsonInt(result, "TimerDecorImageWidth", 220), 20, 1200);
+        result["TimerDecorImageHeight"] = ClampInt(JsonInt(result, "TimerDecorImageHeight", 0), 0, 1000);
+        result["TimerDecorImageRotation"] = ClampInt(JsonInt(result, "TimerDecorImageRotation", 0), -180, 180);
         result["GoalBarWidth"] = 100;
         result["GoalBarHeight"] = ClampInt(JsonInt(result, "GoalBarHeight", 74), 6, 240);
         result["GoalBarX"] = ClampInt(JsonInt(result, "GoalBarX", 0), -800, 800);
@@ -8444,11 +9520,19 @@ public class DonConnectWidgetServer
         result["GoalTextRotation"] = ClampInt(JsonInt(result, "GoalTextRotation", 0), -180, 180);
         NormalizeElementTransform(result, "Title");
         NormalizeElementTransform(result, "GoalMeta");
+        NormalizeElementTransform(result, "GoalDeadline");
+        result["GoalDeadlineFontSize"] = ClampInt(JsonInt(result, "GoalDeadlineFontSize", 18), 8, 96);
+        result["GoalDeadlineTextAlign"] = NormalizeChoice(JsonText(result, "GoalDeadlineTextAlign"), "center", "left", "center", "right");
+        result["GoalDeadlineTitle"] = LimitText(JsonText(result, "GoalDeadlineTitle", "Сбор закончится через"), 160);
+        result["GoalDeadlineEndsAt"] = LimitText(JsonText(result, "GoalDeadlineEndsAt"), 80);
+        result["GoalDeadlineExpiredText"] = LimitText(JsonText(result, "GoalDeadlineExpiredText", "Сбор завершен"), 160);
         NormalizeElementTransform(result, "Services");
         NormalizeElementTransform(result, "LastDonation");
         result["ServicesTextAlign"] = NormalizeChoice(JsonText(result, "ServicesTextAlign"), "center", "left", "center", "right");
         result["ServicesFontSize"] = ClampInt(JsonInt(result, "ServicesFontSize", 14), 8, 64);
         result["HiddenServices"] = NormalizeStringArray(result["HiddenServices"] as JArray, 20);
+        result["GoalLayerOrder"] = NormalizeStringArray(result["GoalLayerOrder"] as JArray, 20);
+        result["TimerLayerOrder"] = NormalizeStringArray(result["TimerLayerOrder"] as JArray, 20);
         result["LastDonationFontSize"] = ClampInt(JsonInt(result, "LastDonationFontSize", 14), 8, 64);
         result["LastDonationTextAlign"] = NormalizeChoice(JsonText(result, "LastDonationTextAlign"), "center", "left", "center", "right");
         result["TimerMode"] = NormalizeChoice(JsonText(result, "TimerMode"), "countdown", "countdown", "countup-reset");
@@ -8457,6 +9541,7 @@ public class DonConnectWidgetServer
         result["TimerWidth"] = ClampInt(JsonInt(result, "TimerWidth", 320), 80, 1600);
         result["TimerHeight"] = ClampInt(JsonInt(result, "TimerHeight", 0), 0, 1000);
         result["TimerRotation"] = ClampInt(JsonInt(result, "TimerRotation", 0), -180, 180);
+        NormalizeElementTransform(result, "TimerHeader");
         NormalizeElementTransform(result, "TimerTitle");
         NormalizeElementTransform(result, "TimerSubtitle");
         NormalizeElementTransform(result, "TimerValue");
@@ -8482,9 +9567,11 @@ public class DonConnectWidgetServer
         CopyJsonValues(result, incoming);
         result["Width"] = ClampInt(JsonInt(result, "Width", 920), 320, 1920);
         result["FontSize"] = ClampInt(JsonInt(result, "FontSize", 42), 14, 120);
-        result["DurationSeconds"] = ClampInt(JsonInt(result, "DurationSeconds", ParseDurationSeconds(JsonText(result, "Duration"), 70)), 5, 600);
+        result["DurationSeconds"] = ClampInt(JsonInt(result, "DurationSeconds", ParseDurationSeconds(JsonText(result, "Duration"), 180)), 5, 600);
         result["Duration"] = result["DurationSeconds"].ToString() + "s";
         result["HiddenSections"] = NormalizeStringArray(result["HiddenSections"] as JArray, 80);
+        result["SectionLabels"] = LimitText(JsonText(result, "SectionLabels", DefaultWidgetCreditsLabels()), 6000);
+        result["SectionFonts"] = LimitText(JsonText(result, "SectionFonts"), 6000);
         result["UseNativeCredits"] = true;
         bool transparentBackground = JsonBool(result, "TransparentBackground", JsonText(result, "BackgroundColor", "transparent").Equals("transparent", StringComparison.OrdinalIgnoreCase));
         if (JsonText(result, "BackgroundColor", "#000000").Equals("transparent", StringComparison.OrdinalIgnoreCase))
@@ -8510,9 +9597,11 @@ public class DonConnectWidgetServer
         JObject incoming = string.IsNullOrWhiteSpace(raw) ? new JObject() : JObject.Parse(raw);
         JObject result = DefaultLeaderboardSettings();
         CopyJsonValues(result, incoming);
-        result["Mode"] = NormalizeChoice(JsonText(result, "Mode"), "overall", "overall", "platform-slides", "recent");
+        result["Mode"] = NormalizeChoice(JsonText(result, "Mode"), "overall", "overall", "month", "week", "stream", "platform-slides", "recent");
         result["TopCount"] = ClampInt(JsonInt(result, "TopCount", 5), 1, 10);
         result["SlideDuration"] = ClampInt(JsonInt(result, "SlideDuration", 5000), 1000, 30000);
+        result["SlideAnimation"] = NormalizeChoice(JsonText(result, "SlideAnimation"), "fade", "none", "fade", "slide");
+        result["ResetOnStart"] = JsonBool(result, "ResetOnStart", false);
         result["Width"] = ClampInt(JsonInt(result, "Width", 560), 240, 1920);
         result["Padding"] = ClampInt(JsonInt(result, "Padding", 18), 0, 120);
         result["BorderRadius"] = ClampInt(JsonInt(result, "BorderRadius", 16), 0, 120);
@@ -8521,6 +9610,12 @@ public class DonConnectWidgetServer
         result["RowGap"] = ClampInt(JsonInt(result, "RowGap", 8), 0, 48);
         result["Opacity"] = ClampDouble(JsonDouble(result, "Opacity", 0.94), 0, 1);
         result["TextAlign"] = NormalizeChoice(JsonText(result, "TextAlign"), "left", "left", "center", "right");
+        result["DecorImageFit"] = NormalizeChoice(JsonText(result, "DecorImageFit"), "contain", "contain", "cover");
+        result["DecorImageWidth"] = ClampInt(JsonInt(result, "DecorImageWidth", 220), 20, 1600);
+        result["DecorImageHeight"] = ClampInt(JsonInt(result, "DecorImageHeight", 160), 20, 1000);
+        result["DecorImageX"] = ClampInt(JsonInt(result, "DecorImageX", 0), -800, 800);
+        result["DecorImageY"] = ClampInt(JsonInt(result, "DecorImageY", 0), -600, 600);
+        result["DecorImageRotation"] = ClampInt(JsonInt(result, "DecorImageRotation", 0), -180, 180);
         return result;
     }
 
@@ -8659,7 +9754,7 @@ public class DonConnectWidgetServer
 
     private void AddCreditDonation(JObject donation)
     {
-        if (donation == null)
+        if (donation == null || IsTestDonationJson(donation))
             return;
 
         var item = new JObject();
@@ -8687,7 +9782,7 @@ public class DonConnectWidgetServer
 
     private void AddLeaderboardDonation(JObject donation)
     {
-        if (donation == null)
+        if (donation == null || IsTestDonationJson(donation))
             return;
 
         var item = new JObject();
@@ -8720,22 +9815,43 @@ public class DonConnectWidgetServer
         lock (StateLock)
         {
             foreach (JObject item in LeaderboardItems)
-                source.Add((JObject)item.DeepClone());
+                if (!IsTestDonationJson(item))
+                    source.Add((JObject)item.DeepClone());
         }
 
-        if (source.Count == 0)
+        if (source.Count == 0 && !JsonBool(settings, "ResetOnStart", false))
             source = SampleLeaderboardItems();
 
         var result = new JObject();
         result["eventId"] = LeaderboardEventId;
         result["settings"] = settings;
         result["overall"] = AggregateLeaderboard(source, "", limit);
+        result["month"] = AggregateLeaderboard(FilterLeaderboardByAge(source, TimeSpan.FromDays(31)), "", limit);
+        result["week"] = AggregateLeaderboard(FilterLeaderboardByAge(source, TimeSpan.FromDays(7)), "", limit);
+        result["stream"] = AggregateLeaderboard(FilterLeaderboardSince(source, SessionStartedUtc), "", limit);
         result["recent"] = RecentLeaderboard(source, limit);
         result["slides"] = PlatformLeaderboardSlides(source, limit);
         var data = new JArray();
         foreach (JObject item in source)
             data.Add(item.DeepClone());
         result["data"] = data;
+        return result;
+    }
+
+    private List<JObject> FilterLeaderboardByAge(List<JObject> items, TimeSpan age)
+    {
+        return FilterLeaderboardSince(items, DateTime.UtcNow.Subtract(age));
+    }
+
+    private List<JObject> FilterLeaderboardSince(List<JObject> items, DateTime sinceUtc)
+    {
+        var result = new List<JObject>();
+        foreach (JObject item in items)
+        {
+            DateTime timestamp;
+            if (!DateTime.TryParse(JsonText(item, "timestamp"), null, DateTimeStyles.RoundtripKind, out timestamp) || timestamp.ToUniversalTime() >= sinceUtc.ToUniversalTime())
+                result.Add(item);
+        }
         return result;
     }
 
@@ -9344,9 +10460,14 @@ public class DonConnectWidgetServer
     .health { font-size:13px; font-weight:900; color:#667585; white-space:nowrap; }
     .health.connected { color:#1f7a4d; } .health.error { color:#b42318; } .health.developing { color:#9a6700; }
     .health-detail { min-height:20px; margin:0 0 9px; color:#536170; font-size:13px; font-weight:800; }
+    .fees { display:grid; gap:4px; margin-top:12px; padding:10px; border:1px solid #e3e9ef; border-radius:7px; background:#f8fafb; color:#465564; font-size:12px; }
+    .fees b { color:#17202a; font-size:13px; }
+    .fees a { color:#1f6f8b; font-weight:800; text-decoration:none; }
     .enable { display:flex; align-items:center; gap:8px; margin-top:11px; font-weight:800; } .enable input { width:18px; height:18px; }
     .fields { display:grid; gap:9px; } label { display:grid; gap:4px; font-weight:700; }
-    input[type=""text""], input[type=""password""] { width:100%; border:1px solid #cbd5df; border-radius:6px; padding:9px 10px; font:inherit; }
+    input[type=""text""], input[type=""password""], select { width:100%; border:1px solid #cbd5df; border-radius:6px; padding:9px 10px; font:inherit; background:#fff; }
+    .hint { padding:9px 10px; border:1px solid #d9e6f2; border-radius:7px; background:#f6faff; color:#3c5267; font-size:12px; font-weight:700; }
+    .hint.warning { border-color:#f0c7bd; background:#fff7f5; color:#9f2d20; }
     .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
     button, .link { display:inline-flex; align-items:center; justify-content:center; border:1px solid #b9c4cf; border-radius:7px; padding:8px 11px; background:#fff; color:#17202a; font:inherit; font-weight:800; text-decoration:none; cursor:pointer; }
     button.primary { background:#1f7a4d; border-color:#1f7a4d; color:#fff; }
@@ -9360,7 +10481,7 @@ public class DonConnectWidgetServer
   <header><h1>DonConnect: подключение площадок</h1><a href=""/donconnect/editor"">Редактор виджетов</a></header>
   <main>
     <p class=""intro"">Включите нужные площадки, вставьте токены и нажмите «Сохранить подключения». Сохранённые токены никогда не показываются обратно в браузере.</p>
-    <details class=""provider"" data-provider=""donationalerts""><summary><span>DonationAlerts</span><strong class=""health"" data-health></strong></summary><div class=""provider-body""><div><p>Авторизация откроется в браузере. Ручной токен не нужен.</p><label class=""enable""><input type=""checkbox"" data-enabled> Подключить</label></div><div class=""fields""><div class=""health-detail"" data-health-detail></div><div class=""row""><button type=""button"" id=""authorizeDa"">Авторизовать DonationAlerts</button><a class=""link"" href=""https://www.donationalerts.com/dashboard/general"" target=""_blank"" rel=""noreferrer"">Личный кабинет</a></div><div class=""saved"" data-saved></div></div></div></details>
+    <details class='provider' data-provider='donationalerts'><summary><span>DonationAlerts</span><strong class='health' data-health></strong></summary><div class='provider-body'><div><p>В Beta 3 DonConnect больше не использует общее приложение DonationAlerts. Создайте свое приложение, вставьте Client ID и Client Secret, сохраните подключения и нажмите авторизацию.</p><label class='enable'><input type='checkbox' data-enabled> Подключить</label></div><div class='fields'><div class='health-detail' data-health-detail></div><div class='hint' data-da-help>1. Нажмите «Создать приложение». 2. В DonationAlerts укажите Redirect URL: http://127.0.0.1:8597/donconnect/donationalerts/callback/ 3. Вставьте Client ID и Client Secret сюда.</div><label>Client ID приложения<input type='text' data-field='clientId' autocomplete='off'></label><label>Client Secret приложения<input type='password' data-field='clientSecret' autocomplete='off'></label><div class='row'><a class='link' href='https://www.donationalerts.com/application/clients' target='_blank' rel='noreferrer'>Создать приложение</a><a class='link' href='https://www.donationalerts.com/dashboard/general' target='_blank' rel='noreferrer'>Личный кабинет</a><button type='button' id='authorizeDa'>Авторизовать DonationAlerts</button></div><div class='saved' data-saved></div></div></div></details>
     <details class=""provider"" data-provider=""donatex""><summary><span>DonateX.gg</span><strong class=""health"" data-health></strong></summary><div class=""provider-body""><div><label class=""enable""><input type=""checkbox"" data-enabled> Подключить</label></div><div class=""fields""><div class=""health-detail"" data-health-detail></div><label>Access token<input type=""password"" data-field=""accessToken"" autocomplete=""off""></label><a class=""link"" href=""https://donatex.gg/streamer/settings"" target=""_blank"" rel=""noreferrer"">Где взять токен</a><div class=""saved"" data-saved></div></div></div></details>
     <details class=""provider"" data-provider=""donatepayru""><summary><span>DonatePay RU</span><strong class=""health"" data-health></strong></summary><div class=""provider-body""><div><label class=""enable""><input type=""checkbox"" data-enabled> Подключить</label></div><div class=""fields""><div class=""health-detail"" data-health-detail></div><label>API key<input type=""password"" data-field=""apiKey"" autocomplete=""off""></label><a class=""link"" href=""https://donatepay.ru/page/api"" target=""_blank"" rel=""noreferrer"">Открыть страницу API</a><div class=""saved"" data-saved></div></div></div></details>
     <details class=""provider"" data-provider=""donatepayeu""><summary><span>DonatePay EU</span><strong class=""health"" data-health></strong></summary><div class=""provider-body""><div><label class=""enable""><input type=""checkbox"" data-enabled> Подключить</label></div><div class=""fields""><div class=""health-detail"" data-health-detail></div><label>API key<input type=""password"" data-field=""apiKey"" autocomplete=""off""></label><a class=""link"" href=""https://donatepay.ru/page/api"" target=""_blank"" rel=""noreferrer"">Открыть страницу API</a><div class=""saved"" data-saved></div></div></div></details>
@@ -9376,15 +10497,35 @@ public class DonConnectWidgetServer
   <script>
     const cards = Array.from(document.querySelectorAll('[data-provider]'));
     const statusEl = document.getElementById('status');
+    const providerFees = {
+      donationalerts:{ in:'Ввод: карты EUR/USD 12%, после 10 000 EUR за прошлый месяц 9%; BRL 14%/12%. Для CIS условия отдельные.', out:'Вывод: карты EUR/USD 1 EUR/USD; доступные методы зависят от региона.', url:'https://www.donationalerts.com/terms-of-service/payments' },
+      donatepayru:{ in:'Ввод: базово 9% для новых аккаунтов; по отдельным методам в таблице до 10%, скидки зависят от аккаунта.', out:'Вывод: карта/МИР 2%, мин. 28 ₽; СБП 2%; FK Wallet 0%; USDT 7% + комиссия сети.', url:'https://donatepay.ru/tariffs' },
+      donatepayeu:{ in:'Ввод: условия DonatePay зависят от региона и аккаунта; для RU-таблицы базово 9%, отдельные методы до 10%.', out:'Вывод: зависит от метода/региона. Для RU-таблицы карта/МИР 2%, мин. 28 ₽; СБП 2%.', url:'https://donatepay.eu/' },
+      donatex:{ in:'Ввод: по соглашению стримера базово 8% с рублёвых платежей и 14% с зарубежных.', out:'Вывод: комиссия может применяться и показывается в личном кабинете стримера.', url:'https://donatex.gg/streamer-agreement' },
+      oda:{ in:'ODA подключает платёжные сервисы напрямую, единой комиссии ODA в открытой таблице нет.', out:'Вывод зависит от подключенного платёжного сервиса/банка.', url:'https://oda.digital/' },
+      streamelements:{ in:'StreamElements/SE.Pay не забирает долю с чаевых; комиссии идут платёжному процессору.', out:'Вывод с доступного баланса, минимально около 5 USD или эквивалент; банковские сроки зависят от страны.', url:'https://support.streamelements.com/hc/en-us/articles/10474426240914-SE-Pay-Overview' },
+      streamlabs:{ in:'Streamlabs не берёт долю. Stripe-карты обычно 2.9% + $0.30, возможна 2% конвертация валюты.', out:'Вывод и chargeback-комиссии зависят от платёжного процессора.', url:'https://streamlabs.com/content-hub/post/stripe-tipping-faqs' },
+      donatestream:{ in:'Приём: с остатка 0%; карты от 3.4% + 10 ₽; ЮMoney может быть 8.5%, зависит от метода.', out:'Через CloudTips: Т-Банк 5%; другие карты РФ 7% + 30 ₽ при выводе меньше 1000 ₽.', url:'https://donate.stream/tariffs' },
+      destream:{ in:'По открытым описаниям deStream использует единую комиссию около 4.77%.', out:'Вывод через deStream; минимальная сумма и комиссия зависят от доступного метода.', url:'https://destream.net/' },
+      generic:{ in:'Комиссия не определяется DonConnect.', out:'Зависит от вашего внешнего API/платёжного сервиса.', url:'' }
+    };
+    let currentProviderState = {};
     async function json(url, options) { const response = await fetch(url, options || {}); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status)); return data; }
+    function mediaUrl(file) { return '/donconnect/media/' + String(file || '').split('/').map(encodeURIComponent).join('/'); }
+    function escapeHtml(value) { return String(value || '').replace(/[&<>'\x22]/g, ch => { const c = ch.charCodeAt(0); if (c === 38) return '&amp;'; if (c === 60) return '&lt;'; if (c === 62) return '&gt;'; if (c === 39) return '&#39;'; return '&quot;'; }); }
+    function escapeAttr(value) { return escapeHtml(value); }
     function cleanDiagnostic(value) { const text = String(value || '').trim(); return !text || /^(none|n\/a)$/i.test(text) ? '' : text; }
+    function renderFees() { cards.forEach(card => { const data = providerFees[card.dataset.provider]; if (!data || card.querySelector('[data-fees]')) return; const host = card.querySelector('.provider-body > div:first-child'); if (!host) return; const box = document.createElement('div'); box.className = 'fees'; box.dataset.fees = 'true'; box.innerHTML = '<b>Комиссии</b><span>Ввод: ' + escapeHtml(data.in.replace(/^Ввод:\\s*/i, '')) + '</span><span>Вывод: ' + escapeHtml(data.out.replace(/^Вывод:\\s*/i, '')) + '</span>' + (data.url ? '<a href=""' + escapeAttr(data.url) + '"" target=""_blank"" rel=""noreferrer"">Проверить актуальные условия</a>' : ''); host.appendChild(box); }); }
     function health(item) { const connection = cleanDiagnostic(item.connection).toLowerCase(); const error = cleanDiagnostic(item.error); if (!item.enabled) return { title:'Отключено', detail:'Доступно. Площадка отключена.', css:'' }; if (error) return { title:'Отключено', detail:'Доступно. Ошибка подключения: ' + error, css:'error' }; if (connection === 'connected') return { title:'Подключено', detail:'Доступно. Соединение активно.', css:'connected' }; if (connection === 'connecting') return { title:'Отключено', detail:'Доступно. Выполняется подключение...', css:'' }; return { title:'Отключено', detail:'Доступно. Соединение сейчас не подтверждено' + (connection ? ': ' + connection : '.'), css:'' }; }
-    function applyState(state, refreshInputs) { cards.forEach(card => { const key = card.dataset.provider; const item = state && state[key] || {}; const enabled = card.querySelector('[data-enabled]'); if (enabled && refreshInputs !== false) enabled.checked = item.enabled === true; const saved = Object.keys(item).filter(name => name.endsWith('Saved') && item[name] === true).length; const node = card.querySelector('[data-saved]'); if (node) node.textContent = saved ? 'Настройки сохранены' : 'Токен или настройки ещё не сохранены'; const stateView = health(item); const badge = card.querySelector('[data-health]'); if (badge) { badge.textContent = stateView.title; badge.className = 'health ' + stateView.css; } const detail = card.querySelector('[data-health-detail]'); if (detail) detail.textContent = stateView.detail; if (refreshInputs !== false) card.querySelectorAll('[data-field]').forEach(input => { const flag = input.dataset.field + 'Saved'; input.value = ''; input.placeholder = item[flag] ? 'Сохранено, оставьте пустым без изменений' : 'Вставьте значение'; }); }); }
+    function donationAlertsInfo() { const card = document.querySelector('[data-provider=donationalerts]'); const state = currentProviderState.donationalerts || {}; const modeInput = card ? card.querySelector('[data-field=authMode]') : null; const idInput = card ? card.querySelector('[data-field=clientId]') : null; const secretInput = card ? card.querySelector('[data-field=clientSecret]') : null; const mode = modeInput ? (modeInput.value || state.authMode || 'own') : (state.authMode || 'own'); const hasClientId = !!(idInput && idInput.value.trim()) || state.clientIdSaved === true; const hasClientSecret = !!(secretInput && secretInput.value.trim()) || state.clientSecretSaved === true; return { card, mode, ready:hasClientId && hasClientSecret }; }
+    function updateDonationAlertsHelp(forceWarning) { const help = document.querySelector('[data-da-help]'); if (!help) return; const info = donationAlertsInfo(); help.className = 'hint' + ((forceWarning || !info.ready) ? ' warning' : ''); help.textContent = info.ready ? 'Ключи своего приложения готовы. Нажмите «Сохранить подключения» или сразу «Авторизовать DonationAlerts».' : 'Сначала создайте приложение DonationAlerts, укажите Redirect URL http://127.0.0.1:8597/donconnect/donationalerts/callback/, затем вставьте Client ID и Client Secret сюда.'; }
+    function applyState(state, refreshInputs) { currentProviderState = state || {}; cards.forEach(card => { const key = card.dataset.provider; const item = state && state[key] || {}; const enabled = card.querySelector('[data-enabled]'); if (enabled && refreshInputs !== false) enabled.checked = item.enabled === true; const saved = Object.keys(item).filter(name => name.endsWith('Saved') && item[name] === true).length; const node = card.querySelector('[data-saved]'); if (node) node.textContent = saved ? 'Настройки сохранены' : 'Токен или настройки ещё не сохранены'; const stateView = health(item); const badge = card.querySelector('[data-health]'); if (badge) { badge.textContent = stateView.title; badge.className = 'health ' + stateView.css; } const detail = card.querySelector('[data-health-detail]'); if (detail) detail.textContent = stateView.detail; if (refreshInputs !== false) card.querySelectorAll('[data-field]').forEach(input => { const field = input.dataset.field; if (input.tagName === 'SELECT') { input.value = item[field] || input.dataset.default || input.value || ''; return; } const flag = field + 'Saved'; input.value = ''; input.placeholder = item[flag] ? 'Сохранено, оставьте пустым без изменений' : 'Вставьте значение'; }); }); updateDonationAlertsHelp(false); }
     function payload() { const providers = {}; cards.forEach(card => { const item = { enabled:card.querySelector('[data-enabled]').checked }; card.querySelectorAll('[data-field]').forEach(input => { const value = input.value.trim(); if (value) item[input.dataset.field] = value; }); providers[card.dataset.provider] = item; }); return { providers }; }
     async function load(refreshInputs) { try { applyState(await json('/donconnect/api/provider-settings', { cache:'no-store' }), refreshInputs); } catch (error) { statusEl.textContent = error.message; } }
     document.getElementById('save').addEventListener('click', async () => { try { statusEl.textContent = 'Сохраняю и переподключаю площадки...'; applyState(await json('/donconnect/api/provider-settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload()) }), true); statusEl.textContent = 'Подключения сохранены'; setTimeout(() => load(false), 1500); } catch (error) { statusEl.textContent = error.message; } });
-    document.getElementById('authorizeDa').addEventListener('click', async () => { try { statusEl.textContent = 'Завершите авторизацию DonationAlerts в открывшемся окне...'; const result = await json('/donconnect/api/provider-authorize-donationalerts', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' }); applyState(result, true); statusEl.textContent = result.authorized ? 'DonationAlerts подключен' : 'Авторизация DonationAlerts не завершена'; } catch (error) { statusEl.textContent = error.message; } });
-    load(true); setInterval(() => load(false), 5000);
+    document.getElementById('authorizeDa').addEventListener('click', async () => { try { const info = donationAlertsInfo(); if (!info.ready) { if (info.card) info.card.open = true; updateDonationAlertsHelp(true); statusEl.textContent = 'Сначала создайте приложение DonationAlerts и вставьте Client ID + Client Secret.'; return; } statusEl.textContent = 'Сохраняю DonationAlerts и открываю авторизацию...'; applyState(await json('/donconnect/api/provider-settings', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload()) }), true); statusEl.textContent = 'Завершите авторизацию DonationAlerts в открывшемся окне...'; const result = await json('/donconnect/api/provider-authorize-donationalerts', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' }); applyState(result, true); statusEl.textContent = result.authorized ? 'DonationAlerts подключен' : 'Авторизация DonationAlerts не завершена'; } catch (error) { statusEl.textContent = error.message; } });
+    document.querySelectorAll('[data-provider=donationalerts] [data-field]').forEach(input => input.addEventListener('input', () => updateDonationAlertsHelp(false)));
+    renderFees(); load(true); setInterval(() => load(false), 5000);
   </script>
 </body>
 </html>";
@@ -9402,7 +10543,9 @@ public class DonConnectWidgetServer
     * { box-sizing: border-box; }
     body { margin:0; height:100vh; overflow:hidden; background:#f4f6f8; color:#17202a; font:15px/1.45 Segoe UI, Arial, sans-serif; }
     header { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:14px; padding:10px 22px; background:#111820; color:#fff; }
+    .brand-title { display:flex; align-items:center; gap:10px; min-width:0; }
     header h1 { margin:0; font-size:18px; letter-spacing:0; }
+    .version-badge { color:#b8c0cc; border:1px solid rgba(255,255,255,.18); border-radius:999px; padding:3px 8px; font-size:11px; font-weight:900; white-space:nowrap; }
     .header-actions { display:flex; align-items:center; justify-content:flex-end; gap:12px; }
     .header-link { display:inline-flex; align-items:center; justify-content:center; min-height:36px; border:1px solid rgba(255,255,255,.28); border-radius:7px; padding:7px 11px; color:#fff; text-decoration:none; font-weight:900; }
     .header-link:hover { background:#26323e; }
@@ -9410,10 +10553,27 @@ public class DonConnectWidgetServer
     .language select { min-width:138px; border:1px solid rgba(255,255,255,.28); border-radius:6px; padding:7px 9px; background:#19232d; color:#fff; font:inherit; }
     main { display:grid; grid-template-columns:minmax(360px, 460px) 1fr; height:calc(100vh - 58px); min-height:0; }
     .controls { min-height:0; overflow:auto; padding:18px; background:#fff; border-right:1px solid #dde3ea; }
-    .preview { min-width:0; min-height:0; overflow:hidden; display:grid; grid-template-rows:auto 1fr; gap:12px; padding:20px; background:#20242b; }
+    .preview { position:relative; min-width:0; min-height:0; overflow:hidden; display:grid; grid-template-rows:auto 1fr; gap:12px; padding:20px; background:#20242b; }
     .preview-head { display:flex; align-items:center; justify-content:space-between; gap:10px; color:#fff; font-weight:800; }
+    .preview-tools { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
     .preview-toggle { display:flex; align-items:center; gap:8px; margin:0; padding:5px 9px; border:1px solid rgba(255,255,255,.25); border-radius:6px; color:#fff; cursor:pointer; }
     .preview-toggle input { width:17px; height:17px; margin:0; }
+    .layers-panel { position:absolute; top:68px; right:22px; z-index:5; width:220px; max-height:min(54vh, 440px); overflow:auto; border:1px solid rgba(255,255,255,.12); border-radius:8px; background:rgba(15,21,29,.94); box-shadow:0 18px 42px rgba(0,0,0,.34); color:#edf5ff; padding:9px; backdrop-filter:blur(10px); }
+    .layers-panel.hidden { display:none; }
+    .layers-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:0 0 8px; }
+    .layers-title { margin:0; font-size:12px; font-weight:900; text-transform:uppercase; letter-spacing:.04em; color:#9fe7b5; }
+    .layers-reset, .layer-action { display:inline-flex; align-items:center; justify-content:center; border:1px solid #3e5164; border-radius:5px; background:#111820; color:#edf5ff; padding:0; min-width:26px; height:24px; font:900 13px/1 Segoe UI, Arial, sans-serif; cursor:pointer; }
+    .layers-reset:hover, .layer-action:hover { background:#223044; border-color:#6f87a1; }
+    .layers-list { display:grid; gap:6px; }
+    .layer-item { display:flex; align-items:center; justify-content:space-between; gap:6px; width:100%; min-height:31px; border:1px solid #334155; border-radius:6px; background:#18212b; color:#edf5ff; padding:5px 6px; font:800 12px/1.15 Segoe UI, Arial, sans-serif; text-align:left; cursor:grab; }
+    .layer-item:hover { background:#223044; border-color:#486078; }
+    .layer-item.active { border-color:#35d07f; box-shadow:0 0 0 1px rgba(53,208,127,.45); }
+    .layer-item.dragging { opacity:.55; }
+    .layer-item.drop-target { border-color:#ffcf5a; box-shadow:0 0 0 2px rgba(255,207,90,.34), inset 3px 0 0 #ffcf5a; }
+    .layer-main { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .layer-actions { display:flex; align-items:center; gap:3px; flex:none; }
+    .layer-action[disabled] { opacity:.35; cursor:not-allowed; }
+    .layer-handle { color:#9aa8b8; font-size:13px; flex:none; }
     .tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
     button { border:1px solid #b9c4cf; background:#fff; color:#17202a; border-radius:7px; padding:8px 11px; font:inherit; font-weight:800; cursor:pointer; }
     button.tab { background:#eef3f8; }
@@ -9454,6 +10614,10 @@ public class DonConnectWidgetServer
     .obs-size { color:#17202a; font-size:16px; font-weight:900; line-height:1.35; padding:10px 12px; border-left:4px solid #1f7a4d; background:#eef8f2; }
     .compact-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
     .compact-grid label { margin:0; }
+    .credits-section-rows { display:grid; gap:7px; margin:8px 0 10px; }
+    .credits-section-row { display:grid; grid-template-columns:minmax(110px,.8fr) minmax(130px,1fr) minmax(145px,1fr); gap:8px; align-items:end; border:1px solid #d9e0e7; border-radius:7px; padding:8px; background:#fff; }
+    .credits-section-key { color:#536170; font-size:12px; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-bottom:9px; }
+    .credits-section-row label { margin:0; }
     .rule-card { border:1px solid #d9e0e7; border-radius:7px; padding:10px; margin:0 0 9px; background:#f9fbfd; }
     .rule-card select[multiple] { min-height:92px; }
     .rule-range { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
@@ -9470,9 +10634,9 @@ public class DonConnectWidgetServer
   </style>
 </head>
 <body>
-  <header><h1>DonConnect Editors</h1><div class=""header-actions""><a class=""header-link"" id=""providersLink"" href=""/donconnect/providers"">Providers</a><label class=""language""><span id=""languageLabel"">Language</span><select id=""languageSelect""><option value=""en"">English</option><option value=""ru"">&#1056;&#1091;&#1089;&#1089;&#1082;&#1080;&#1081;</option><option value=""uk"">&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072;</option></select></label></div></header>  <main>
+  <header><div class=""brand-title""><h1>DonConnect Editors</h1><span class=""version-badge"">0.13.0-beta.3.14</span></div><div class=""header-actions""><a class=""header-link"" id=""providersLink"" href=""/donconnect/providers"">Providers</a><label class=""language""><span id=""languageLabel"">Language</span><select id=""languageSelect""><option value=""en"">English</option><option value=""ru"">&#1056;&#1091;&#1089;&#1089;&#1082;&#1080;&#1081;</option><option value=""uk"">&#1059;&#1082;&#1088;&#1072;&#1111;&#1085;&#1089;&#1100;&#1082;&#1072;</option></select></label></div></header>  <main>
     <section class=""controls"">
-      <nav class=""tabs""><button class=""tab active"" data-tab=""donation"">Donation</button><button class=""tab"" data-tab=""history"">OBS Dock</button><button class=""tab"" data-tab=""goal"">Goal</button><button class=""tab"" data-tab=""timer"">Timer</button><button class=""tab"" data-tab=""credits"">Credits</button><button class=""tab"" data-tab=""leaderboard"">Leaderboard</button><button class=""tab"" data-tab=""filter"">Blocked</button></nav>
+      <nav class=""tabs""><button class=""tab active"" data-tab=""donation"">Donation</button><button class=""tab"" data-tab=""goal"">Goal</button><button class=""tab"" data-tab=""timer"">Timer</button><button class=""tab"" data-tab=""credits"">Credits</button><button class=""tab"" data-tab=""leaderboard"">Leaderboard</button><button class=""tab"" data-tab=""filter"">Blocked</button><button class=""tab"" data-tab=""history"">OBS Dock</button></nav>
 
       <div class=""pane active"" data-pane=""donation"">
         <fieldset><legend>Donation presets</legend><div class=""presets"" id=""donationPresets""></div></fieldset>
@@ -9481,22 +10645,26 @@ public class DonConnectWidgetServer
           <label><span>Height</span><div class=""row""><input data-donation=""Height"" type=""range"" min=""90"" max=""1080""><input data-donation=""Height"" type=""number""></div></label>
           <label><span>Border radius</span><div class=""row""><input data-donation=""BorderRadius"" type=""range"" min=""0"" max=""80""><input data-donation=""BorderRadius"" type=""number""></div></label>
           <label><span>Padding</span><div class=""row""><input data-donation=""Padding"" type=""range"" min=""0"" max=""80""><input data-donation=""Padding"" type=""number""></div></label>
-          <label><span>Font size</span><div class=""row""><input data-donation=""FontSize"" type=""range"" min=""10"" max=""72""><input data-donation=""FontSize"" type=""number""></div></label>
           <label><span>Base font</span><select data-donation=""FontFamily"" data-font-select></select></label>
           <label><span>Opacity</span><div class=""row""><input data-donation=""Opacity"" type=""range"" min=""0.1"" max=""1"" step=""0.01""><input data-donation=""Opacity"" type=""number"" min=""0.1"" max=""1"" step=""0.01""></div></label>
+          <label><span>Visible duration, ms</span><div class=""row""><input data-donation=""DisplayDuration"" type=""range"" min=""500"" max=""60000"" step=""100""><input data-donation=""DisplayDuration"" type=""number"" min=""500"" max=""60000"" step=""100""></div></label>
           <label><span>Animation, ms</span><div class=""row""><input data-donation=""AnimationDuration"" type=""range"" min=""0"" max=""5000"" step=""50""><input data-donation=""AnimationDuration"" type=""number""></div></label>
         </fieldset>
         <fieldset><legend>Donation colors</legend><label class=""color-row""><span>Background</span><input data-donation=""BackgroundColor"" type=""color""></label><label class=""color-row""><span>Text</span><input data-donation=""TextColor"" type=""color""></label><label class=""color-row""><span>Accent</span><input data-donation=""AccentColor"" type=""color""></label></fieldset>
-        <fieldset><legend>Donation templates</legend><label><span>Text align</span><select data-donation=""TextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label><span>Donor</span><input data-donation=""DonorTemplate"" type=""text""></label><label><span>Donor font</span><select data-donation=""DonorFontFamily"" data-font-select></select></label><label><span>Donor X</span><div class=""row""><input data-donation=""DonorX"" type=""range"" min=""-800"" max=""800""><input data-donation=""DonorX"" type=""number""></div></label><label><span>Donor Y</span><div class=""row""><input data-donation=""DonorY"" type=""range"" min=""-600"" max=""600""><input data-donation=""DonorY"" type=""number""></div></label><label><span>Amount</span><input data-donation=""AmountTemplate"" type=""text""></label><label><span>Amount font</span><select data-donation=""AmountFontFamily"" data-font-select></select></label><label><span>Amount X</span><div class=""row""><input data-donation=""AmountX"" type=""range"" min=""-800"" max=""800""><input data-donation=""AmountX"" type=""number""></div></label><label><span>Amount Y</span><div class=""row""><input data-donation=""AmountY"" type=""range"" min=""-600"" max=""600""><input data-donation=""AmountY"" type=""number""></div></label><label><span>Message</span><input data-donation=""MessageTemplate"" type=""text""></label><label><span>Message font</span><select data-donation=""MessageFontFamily"" data-font-select></select></label><label><span>Message X</span><div class=""row""><input data-donation=""MessageX"" type=""range"" min=""-800"" max=""800""><input data-donation=""MessageX"" type=""number""></div></label><label><span>Message Y</span><div class=""row""><input data-donation=""MessageY"" type=""range"" min=""-600"" max=""600""><input data-donation=""MessageY"" type=""number""></div></label><label class=""check-row""><input data-donation=""ShowPlatform"" type=""checkbox""><span>Show platform</span></label><label><span>Platform</span><input data-donation=""PlatformTemplate"" type=""text""></label><label><span>Platform font</span><select data-donation=""PlatformFontFamily"" data-font-select></select></label><label><span>Platform X</span><div class=""row""><input data-donation=""PlatformX"" type=""range"" min=""-800"" max=""800""><input data-donation=""PlatformX"" type=""number""></div></label><label><span>Platform Y</span><div class=""row""><input data-donation=""PlatformY"" type=""range"" min=""-600"" max=""600""><input data-donation=""PlatformY"" type=""number""></div></label></fieldset>
-        <fieldset><legend>Alert media library</legend><div class=""drop"" id=""alertMediaDrop"">Drop PNG/JPG/GIF/MP4/WebM/MP3/WAV here or click</div><input id=""alertMediaFile"" type=""file"" accept=""image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,audio/mpeg,audio/wav,audio/ogg,audio/mp4"" multiple hidden><div class=""buttons""><button type=""button"" id=""openAlertMedia"">Open media folder</button></div><div class=""folder-path"" id=""alertMediaPath""></div><label><span>Default visual</span><select data-donation=""MediaFile"" id=""alertMediaSelect""></select></label><label><span>Alert sound</span><select data-donation=""SoundFile"" id=""alertSoundSelect""></select></label><label><span>Text animation sound</span><select data-donation=""TextSoundFile"" id=""alertTextSoundSelect""></select></label><label><span>Visual placement</span><select data-donation=""MediaPlacement""><option value=""above"">Above text</option><option value=""below"">Below text</option><option value=""left"">Left of text</option><option value=""right"">Right of text</option><option value=""background"">Behind text</option></select></label><label><span>Visual fit</span><select data-donation=""MediaFit""><option value=""contain"">Contain</option><option value=""cover"">Cover</option></select></label><label><span>Visual width</span><div class=""row""><input data-donation=""MediaWidth"" type=""range"" min=""20"" max=""1600""><input data-donation=""MediaWidth"" type=""number""></div></label><label><span>Visual height</span><div class=""row""><input data-donation=""MediaHeight"" type=""range"" min=""20"" max=""1000""><input data-donation=""MediaHeight"" type=""number""></div></label><label><span>Visual X</span><div class=""row""><input data-donation=""MediaX"" type=""range"" min=""-800"" max=""800""><input data-donation=""MediaX"" type=""number""></div></label><label><span>Visual Y</span><div class=""row""><input data-donation=""MediaY"" type=""range"" min=""-600"" max=""600""><input data-donation=""MediaY"" type=""number""></div></label><label class=""check-row""><input data-donation=""VideoMuted"" type=""checkbox""><span>Mute video audio</span></label><div class=""media-grid"" id=""alertMediaGrid""></div></fieldset>
+        <fieldset id=""donationLayoutSection""><legend>Donation layout</legend><label><span>Text align</span><select data-donation=""TextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label></fieldset>
+        <fieldset id=""donorSection"" data-direct-section=""donor""><legend>Donor</legend><label class=""check-row""><input data-donation=""ShowDonor"" type=""checkbox""><span>Show donor</span></label><label><span>Donor</span><input data-donation=""DonorTemplate"" type=""text""></label><label><span>Donor font</span><select data-donation=""DonorFontFamily"" data-font-select></select></label><label><span>Donor font size</span><div class=""row""><input data-donation=""DonorFontSize"" type=""range"" min=""8"" max=""160""><input data-donation=""DonorFontSize"" type=""number""></div></label><label><span>Donor X</span><div class=""row""><input data-donation=""DonorX"" type=""range"" min=""-800"" max=""800""><input data-donation=""DonorX"" type=""number""></div></label><label><span>Donor Y</span><div class=""row""><input data-donation=""DonorY"" type=""range"" min=""-600"" max=""600""><input data-donation=""DonorY"" type=""number""></div></label><label><span>Donor width</span><div class=""row""><input data-donation=""DonorWidth"" type=""range"" min=""0"" max=""1600""><input data-donation=""DonorWidth"" type=""number""></div></label><label><span>Donor height</span><div class=""row""><input data-donation=""DonorHeight"" type=""range"" min=""0"" max=""1000""><input data-donation=""DonorHeight"" type=""number""></div></label><label><span>Donor rotation</span><div class=""row""><input data-donation=""DonorRotation"" type=""range"" min=""-180"" max=""180""><input data-donation=""DonorRotation"" type=""number""></div></label></fieldset>
+        <fieldset id=""amountSection"" data-direct-section=""amount""><legend>Amount</legend><label class=""check-row""><input data-donation=""ShowAmount"" type=""checkbox""><span>Show amount</span></label><label><span>Amount</span><input data-donation=""AmountTemplate"" type=""text""></label><label><span>Amount font</span><select data-donation=""AmountFontFamily"" data-font-select></select></label><label><span>Amount font size</span><div class=""row""><input data-donation=""AmountFontSize"" type=""range"" min=""8"" max=""160""><input data-donation=""AmountFontSize"" type=""number""></div></label><label><span>Amount X</span><div class=""row""><input data-donation=""AmountX"" type=""range"" min=""-800"" max=""800""><input data-donation=""AmountX"" type=""number""></div></label><label><span>Amount Y</span><div class=""row""><input data-donation=""AmountY"" type=""range"" min=""-600"" max=""600""><input data-donation=""AmountY"" type=""number""></div></label><label><span>Amount width</span><div class=""row""><input data-donation=""AmountWidth"" type=""range"" min=""0"" max=""1600""><input data-donation=""AmountWidth"" type=""number""></div></label><label><span>Amount height</span><div class=""row""><input data-donation=""AmountHeight"" type=""range"" min=""0"" max=""1000""><input data-donation=""AmountHeight"" type=""number""></div></label><label><span>Amount rotation</span><div class=""row""><input data-donation=""AmountRotation"" type=""range"" min=""-180"" max=""180""><input data-donation=""AmountRotation"" type=""number""></div></label></fieldset>
+        <fieldset id=""messageSection"" data-direct-section=""message""><legend>Message</legend><label class=""check-row""><input data-donation=""ShowMessage"" type=""checkbox""><span>Show message</span></label><label><span>Message</span><input data-donation=""MessageTemplate"" type=""text""></label><label><span>Message font</span><select data-donation=""MessageFontFamily"" data-font-select></select></label><label><span>Message font size</span><div class=""row""><input data-donation=""MessageFontSize"" type=""range"" min=""8"" max=""160""><input data-donation=""MessageFontSize"" type=""number""></div></label><label><span>Message X</span><div class=""row""><input data-donation=""MessageX"" type=""range"" min=""-800"" max=""800""><input data-donation=""MessageX"" type=""number""></div></label><label><span>Message Y</span><div class=""row""><input data-donation=""MessageY"" type=""range"" min=""-600"" max=""600""><input data-donation=""MessageY"" type=""number""></div></label><label><span>Message width</span><div class=""row""><input data-donation=""MessageWidth"" type=""range"" min=""0"" max=""1600""><input data-donation=""MessageWidth"" type=""number""></div></label><label><span>Message height</span><div class=""row""><input data-donation=""MessageHeight"" type=""range"" min=""0"" max=""1000""><input data-donation=""MessageHeight"" type=""number""></div></label><label><span>Message rotation</span><div class=""row""><input data-donation=""MessageRotation"" type=""range"" min=""-180"" max=""180""><input data-donation=""MessageRotation"" type=""number""></div></label></fieldset>
+        <fieldset id=""platformSection"" data-direct-section=""platform""><legend>Platform</legend><label class=""check-row""><input data-donation=""ShowPlatform"" type=""checkbox""><span>Show platform</span></label><label><span>Platform</span><input data-donation=""PlatformTemplate"" type=""text""></label><label><span>Platform font</span><select data-donation=""PlatformFontFamily"" data-font-select></select></label><label><span>Platform font size</span><div class=""row""><input data-donation=""PlatformFontSize"" type=""range"" min=""8"" max=""160""><input data-donation=""PlatformFontSize"" type=""number""></div></label><label><span>Platform X</span><div class=""row""><input data-donation=""PlatformX"" type=""range"" min=""-800"" max=""800""><input data-donation=""PlatformX"" type=""number""></div></label><label><span>Platform Y</span><div class=""row""><input data-donation=""PlatformY"" type=""range"" min=""-600"" max=""600""><input data-donation=""PlatformY"" type=""number""></div></label><label><span>Platform width</span><div class=""row""><input data-donation=""PlatformWidth"" type=""range"" min=""0"" max=""1600""><input data-donation=""PlatformWidth"" type=""number""></div></label><label><span>Platform height</span><div class=""row""><input data-donation=""PlatformHeight"" type=""range"" min=""0"" max=""1000""><input data-donation=""PlatformHeight"" type=""number""></div></label><label><span>Platform rotation</span><div class=""row""><input data-donation=""PlatformRotation"" type=""range"" min=""-180"" max=""180""><input data-donation=""PlatformRotation"" type=""number""></div></label></fieldset>
+        <fieldset id=""mediaSection"" data-direct-section=""media""><legend>Alert media library</legend><label class=""check-row""><input data-donation=""ShowMedia"" type=""checkbox""><span>Show media</span></label><div class=""drop"" id=""alertMediaDrop"">Drop PNG/JPG/GIF/MP4/WebM/MP3/WAV here or click</div><input id=""alertMediaFile"" type=""file"" accept=""image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,audio/mpeg,audio/wav,audio/ogg,audio/mp4"" multiple hidden><div class=""buttons""><button type=""button"" id=""openAlertMedia"">Open media folder</button></div><div class=""folder-path"" id=""alertMediaPath""></div><label><span>Default visual</span><select data-donation=""MediaFile"" id=""alertMediaSelect""></select></label><label><span>Alert sound</span><select data-donation=""SoundFile"" id=""alertSoundSelect""></select></label><label><span>Text animation sound</span><select data-donation=""TextSoundFile"" id=""alertTextSoundSelect""></select></label><label class=""check-row""><input data-donation=""ShowDecorImage"" type=""checkbox""><span>Show decor image</span></label><label><span>Decor image</span><select data-donation=""DecorImageFile"" id=""alertDecorSelect""></select></label><label><span>Decor fit</span><select data-donation=""DecorImageFit""><option value=""contain"">Contain</option><option value=""cover"">Cover</option></select></label><label><span>Decor width</span><div class=""row""><input data-donation=""DecorImageWidth"" type=""range"" min=""20"" max=""1600""><input data-donation=""DecorImageWidth"" type=""number""></div></label><label><span>Decor height</span><div class=""row""><input data-donation=""DecorImageHeight"" type=""range"" min=""20"" max=""1000""><input data-donation=""DecorImageHeight"" type=""number""></div></label><label><span>Decor X</span><div class=""row""><input data-donation=""DecorImageX"" type=""range"" min=""-800"" max=""800""><input data-donation=""DecorImageX"" type=""number""></div></label><label><span>Decor Y</span><div class=""row""><input data-donation=""DecorImageY"" type=""range"" min=""-600"" max=""600""><input data-donation=""DecorImageY"" type=""number""></div></label><label><span>Decor rotation</span><div class=""row""><input data-donation=""DecorImageRotation"" type=""range"" min=""-180"" max=""180""><input data-donation=""DecorImageRotation"" type=""number""></div></label><label><span>Visual placement</span><select data-donation=""MediaPlacement""><option value=""above"">Above text</option><option value=""below"">Below text</option><option value=""left"">Left of text</option><option value=""right"">Right of text</option><option value=""background"">Behind text</option></select></label><label><span>Visual fit</span><select data-donation=""MediaFit""><option value=""contain"">Contain</option><option value=""cover"">Cover</option></select></label><label><span>Visual width</span><div class=""row""><input data-donation=""MediaWidth"" type=""range"" min=""20"" max=""1600""><input data-donation=""MediaWidth"" type=""number""></div></label><label><span>Visual height</span><div class=""row""><input data-donation=""MediaHeight"" type=""range"" min=""20"" max=""1000""><input data-donation=""MediaHeight"" type=""number""></div></label><label><span>Visual X</span><div class=""row""><input data-donation=""MediaX"" type=""range"" min=""-800"" max=""800""><input data-donation=""MediaX"" type=""number""></div></label><label><span>Visual Y</span><div class=""row""><input data-donation=""MediaY"" type=""range"" min=""-600"" max=""600""><input data-donation=""MediaY"" type=""number""></div></label><label><span>Visual rotation</span><div class=""row""><input data-donation=""MediaRotation"" type=""range"" min=""-180"" max=""180""><input data-donation=""MediaRotation"" type=""number""></div></label><label class=""check-row""><input data-donation=""VideoMuted"" type=""checkbox""><span>Mute video audio</span></label><div class=""media-grid"" id=""alertMediaGrid""></div></fieldset>
         <fieldset><legend>Amount rules</legend><p class=""folder-path"">The most specific matching minimum amount wins. Select several files to randomize them.</p><div id=""alertRules""></div><button type=""button"" id=""addAlertRule"">Add amount rule</button></fieldset>
-        <fieldset><legend>Alert animations</legend><label class=""check-row""><input data-donation=""ShowBackground"" type=""checkbox""><span>Show background</span></label><label><span>Visible duration, ms</span><input data-donation=""DisplayDuration"" type=""number"" min=""500"" max=""60000"" step=""100""></label><label><span>Entry animation</span><select data-donation=""EntryAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide from left</option><option value=""slide-right"">Slide from right</option><option value=""slide-up"">Slide from bottom</option><option value=""slide-down"">Slide from top</option><option value=""zoom"">Zoom</option></select></label><label><span>Exit animation</span><select data-donation=""ExitAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide left</option><option value=""slide-right"">Slide right</option><option value=""slide-up"">Slide up</option><option value=""slide-down"">Slide down</option><option value=""zoom"">Zoom</option><option value=""scatter"">Scatter</option></select></label><label><span>Donor text animation</span><select data-donation=""TextAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""typewriter"">Typewriter</option><option value=""reveal-left"">Reveal left to right</option><option value=""slide-up"">Slide up</option></select></label><label><span>Alert volume</span><div class=""row""><input data-donation=""SoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""SoundVolume"" type=""number""></div></label><label><span>Text sound volume</span><div class=""row""><input data-donation=""TextSoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""TextSoundVolume"" type=""number""></div></label></fieldset>
+        <fieldset><legend>Alert animations</legend><label class=""check-row""><input data-donation=""ShowBackground"" type=""checkbox""><span>Show background</span></label><label><span>Entry animation</span><select data-donation=""EntryAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide from left</option><option value=""slide-right"">Slide from right</option><option value=""slide-up"">Slide from bottom</option><option value=""slide-down"">Slide from top</option><option value=""zoom"">Zoom</option></select></label><label><span>Entry animation speed, ms</span><div class=""row""><input data-donation=""EntryAnimationDuration"" type=""range"" min=""0"" max=""5000"" step=""50""><input data-donation=""EntryAnimationDuration"" type=""number"" min=""0"" max=""5000"" step=""50""></div></label><label><span>Exit animation</span><select data-donation=""ExitAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""slide-left"">Slide left</option><option value=""slide-right"">Slide right</option><option value=""slide-up"">Slide up</option><option value=""slide-down"">Slide down</option><option value=""zoom"">Zoom</option><option value=""scatter"">Scatter</option></select></label><label><span>Exit animation speed, ms</span><div class=""row""><input data-donation=""ExitAnimationDuration"" type=""range"" min=""0"" max=""5000"" step=""50""><input data-donation=""ExitAnimationDuration"" type=""number"" min=""0"" max=""5000"" step=""50""></div></label><label><span>Donor text animation</span><select data-donation=""TextAnimation""><option value=""none"">None</option><option value=""fade"">Fade</option><option value=""typewriter"">Typewriter</option><option value=""reveal-left"">Reveal left to right</option><option value=""slide-up"">Slide up</option></select></label><label><span>Alert volume</span><div class=""row""><input data-donation=""SoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""SoundVolume"" type=""number""></div></label><label><span>Text sound volume</span><div class=""row""><input data-donation=""TextSoundVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""TextSoundVolume"" type=""number""></div></label></fieldset>
         <fieldset><legend>Donation voice</legend><p class=""note"" id=""speechHint"">Windows voice reads the donation from the extension itself. Use Test voice after choosing a voice.</p><label class=""check-row""><input data-donation=""SpeakDonation"" type=""checkbox""><span>Read donation text aloud</span></label><div class=""compact-grid""><label class=""check-row""><input data-donation=""SpeechReadDonor"" type=""checkbox""><span>Read donor name</span></label><label class=""check-row""><input data-donation=""SpeechReadAmount"" type=""checkbox""><span>Read amount</span></label><label class=""check-row""><input data-donation=""SpeechReadPlatform"" type=""checkbox""><span>Read platform</span></label><label class=""check-row""><input data-donation=""SpeechReadMessage"" type=""checkbox""><span>Read message</span></label></div><label><span>Voice</span><select data-donation=""SpeechVoice"" id=""speechVoiceSelect""></select></label><label><span>Voice speed</span><div class=""row""><input data-donation=""SpeechRate"" type=""range"" min=""0.5"" max=""2"" step=""0.05""><input data-donation=""SpeechRate"" type=""number"" min=""0.5"" max=""2"" step=""0.05""></div></label><label><span>Voice pitch</span><div class=""row""><input data-donation=""SpeechPitch"" type=""range"" min=""0.5"" max=""2"" step=""0.05""><input data-donation=""SpeechPitch"" type=""number"" min=""0.5"" max=""2"" step=""0.05""></div></label><label><span>Voice volume</span><div class=""row""><input data-donation=""SpeechVolume"" type=""range"" min=""0"" max=""100""><input data-donation=""SpeechVolume"" type=""number""></div></label><button type=""button"" id=""testSpeech"">Test voice</button></fieldset>
         <fieldset><legend>Custom test alert</legend><label><span>Donor</span><input id=""customTestDonor"" type=""text"" value=""Custom viewer""></label><label><span>Amount</span><input id=""customTestAmount"" type=""number"" value=""777"" step=""0.01""></label><label><span>Currency</span><input id=""customTestCurrency"" type=""text"" value=""RUB""></label><label><span>Platform</span><input id=""customTestPlatform"" type=""text"" value=""Custom test""></label><label><span>Message</span><textarea id=""customTestMessage"" rows=""3"">Custom alert preview</textarea></label><button type=""button"" id=""sendCustomTest"">Send custom alert</button></fieldset>
       </div>
 
       <div class=""pane"" data-pane=""history"">
-        <fieldset><legend>OBS Dock</legend><p class=""note"">Compact OBS dock with recent donations. Replay only repeats the alert and does not add money to goal, timer, credits or leaderboard.</p><div class=""obs-url""><input id=""dockUrlInline"" type=""text"" readonly><button type=""button"" id=""copyDockUrl"">Copy</button></div><div class=""media-grid"" id=""recentDonations""></div></fieldset>
+        <fieldset><legend>OBS Dock</legend><p class=""note"">Compact OBS dock with recent donations. Replay only repeats the alert and does not add money to goal, timer, credits or leaderboard.</p><div class=""obs-url""><input id=""dockUrlInline"" type=""text"" readonly><button type=""button"" id=""copyDockUrl"">Copy</button></div><div class=""buttons""><button type=""button"" id=""openDonationLogs"">Open daily donation logs folder</button></div><div class=""folder-path"" id=""donationLogsPath""></div><div class=""media-grid"" id=""recentDonations""></div></fieldset>
       </div>
 
       <div class=""pane"" data-pane=""goal"">
@@ -9508,26 +10676,28 @@ public class DonConnectWidgetServer
         <fieldset><legend>Decor image</legend><label class=""check-row""><input data-overlay=""ShowDecorImage"" type=""checkbox""><span>Show decor image</span></label><div class=""drop"" id=""decorDrop"">Drop PNG/JPG/WebP here or click</div><input id=""decorImageFile"" type=""file"" accept=""image/png,image/jpeg,image/webp,image/gif"" hidden><div class=""image-name"" id=""decorImageName""></div><button type=""button"" id=""clearDecorImage"">Clear image</button><label><span>Image X</span><div class=""row""><input data-overlay=""DecorImageX"" type=""range"" min=""-800"" max=""800""><input data-overlay=""DecorImageX"" type=""number""></div></label><label><span>Image Y</span><div class=""row""><input data-overlay=""DecorImageY"" type=""range"" min=""-600"" max=""600""><input data-overlay=""DecorImageY"" type=""number""></div></label><label><span>Image width</span><div class=""row""><input data-overlay=""DecorImageWidth"" type=""range"" min=""20"" max=""1200""><input data-overlay=""DecorImageWidth"" type=""number""></div></label></fieldset>
         <fieldset><legend>Last donation</legend><label class=""check-row""><input data-overlay=""ShowLastDonor"" type=""checkbox""><span>Show last donor</span></label><label class=""check-row""><input data-overlay=""ShowLastAmount"" type=""checkbox""><span>Show last amount</span></label><label class=""check-row""><input data-overlay=""ShowLastPlatform"" type=""checkbox""><span>Show last platform</span></label><label><span>Last donation font</span><select data-overlay=""LastDonationFontFamily"" data-font-select></select></label><label><span>Last donation size</span><div class=""row""><input data-overlay=""LastDonationFontSize"" type=""range"" min=""8"" max=""64""><input data-overlay=""LastDonationFontSize"" type=""number""></div></label><label><span>Last donation align</span><select data-overlay=""LastDonationTextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label></fieldset>
         <fieldset><legend>Connected services</legend><label class=""check-row""><input data-overlay=""ShowServices"" type=""checkbox""><span>Show connected services</span></label><label><span>Services title</span><input data-overlay=""ServicesTitle"" type=""text""></label><label><span>Providers font</span><select data-overlay=""ServicesFontFamily"" data-font-select></select></label><label><span>Services align</span><select data-overlay=""ServicesTextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label><span>Services size</span><div class=""row""><input data-overlay=""ServicesFontSize"" type=""range"" min=""8"" max=""64""><input data-overlay=""ServicesFontSize"" type=""number""></div></label><p class=""note"">Only enabled providers are shown. Clear a checkbox to hide a provider from Goal.</p><div id=""serviceToggles"" class=""compact-grid""></div></fieldset>
+        <fieldset id=""goalDeadlineSection"" data-direct-section=""goalDeadline""><legend>Goal deadline timer</legend><label class=""check-row""><input data-overlay=""GoalDeadlineEnabled"" type=""checkbox""><span>Show goal deadline timer</span></label><label><span>Timer title</span><input data-overlay=""GoalDeadlineTitle"" type=""text""></label><label><span>End date and time</span><input data-overlay=""GoalDeadlineEndsAt"" type=""datetime-local"" step=""1""></label><div class=""compact-grid""><label><span>Days</span><input id=""goalDeadlineDays"" type=""number"" min=""0"" step=""1"" value=""0""></label><label><span>Hours</span><input id=""goalDeadlineHours"" type=""number"" min=""0"" step=""1"" value=""0""></label><label><span>Minutes</span><input id=""goalDeadlineMinutes"" type=""number"" min=""0"" step=""1"" value=""0""></label><label><span>Seconds</span><input id=""goalDeadlineSeconds"" type=""number"" min=""0"" step=""1"" value=""0""></label></div><div class=""buttons""><button type=""button"" id=""goalDeadlineSetDuration"">Set from now</button><button type=""button"" id=""goalDeadlineExtendDuration"">Extend</button><button type=""button"" id=""goalDeadlineStop"">Turn off</button></div><label><span>Expired text</span><input data-overlay=""GoalDeadlineExpiredText"" type=""text""></label><label class=""check-row""><input data-overlay=""GoalDeadlineShowDate"" type=""checkbox""><span>Show end date</span></label><label><span>Timer font</span><select data-overlay=""GoalDeadlineFontFamily"" data-font-select></select></label><label><span>Timer size</span><div class=""row""><input data-overlay=""GoalDeadlineFontSize"" type=""range"" min=""8"" max=""96""><input data-overlay=""GoalDeadlineFontSize"" type=""number""></div></label><label><span>Timer align</span><select data-overlay=""GoalDeadlineTextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label><span>Timer X</span><div class=""row""><input data-overlay=""GoalDeadlineX"" type=""range"" min=""-800"" max=""800""><input data-overlay=""GoalDeadlineX"" type=""number""></div></label><label><span>Timer Y</span><div class=""row""><input data-overlay=""GoalDeadlineY"" type=""range"" min=""-600"" max=""600""><input data-overlay=""GoalDeadlineY"" type=""number""></div></label><label><span>Timer width</span><div class=""row""><input data-overlay=""GoalDeadlineWidth"" type=""range"" min=""0"" max=""1600""><input data-overlay=""GoalDeadlineWidth"" type=""number""></div></label><label><span>Timer height</span><div class=""row""><input data-overlay=""GoalDeadlineHeight"" type=""range"" min=""0"" max=""1000""><input data-overlay=""GoalDeadlineHeight"" type=""number""></div></label><label><span>Timer rotation</span><div class=""row""><input data-overlay=""GoalDeadlineRotation"" type=""range"" min=""-180"" max=""180""><input data-overlay=""GoalDeadlineRotation"" type=""number""></div></label><p class=""note"" id=""goalDeadlineNote"">This timer shows when the fundraising goal ends. It does not add or remove time from the donation timer.</p></fieldset>
       </div>
 
       <div class=""pane"" data-pane=""timer"">
         <fieldset><legend>Timer presets</legend><div class=""presets"" id=""timerPresets""></div></fieldset>
-        <fieldset><legend>Timer editor</legend><label><span>Mode</span><select data-overlay=""TimerMode""><option value=""countdown"">Countdown: donations add time</option><option value=""countup-reset"">Count up: reset to zero on event</option></select></label><label><span>Title 1</span><input data-overlay=""TimerHeaderTitle"" type=""text""></label><label><span>Title 2</span><input data-overlay=""TimerTitle"" type=""text""></label><label><span>Subtitle</span><input data-overlay=""TimerSubtitle"" type=""text""></label><label><span>Start value, seconds</span><input data-overlay=""TimerStartSeconds"" type=""number""></label><label><span>Donation amount for one time step</span><input data-overlay=""TimerUnitAmount"" type=""number"" step=""0.01""></label><label><span>Seconds added for that amount</span><input data-overlay=""TimerSecondsPerUnit"" type=""number""></label><label><span>Maximum timer seconds, 0 = no limit</span><input data-overlay=""TimerMaxSeconds"" type=""number""></label><label><span>Currency</span><input data-overlay=""TimerCurrency"" type=""text""></label><p class=""note"">Example: amount 100 and seconds 3600 means 100 RUB = 60 min.</p></fieldset>
+        <fieldset><legend>Timer editor</legend><label><span>Mode</span><select data-overlay=""TimerMode""><option value=""countdown"">Countdown: donations add time</option><option value=""countup-reset"">Count up: reset to zero on event</option></select></label><label><span>Title 1</span><input data-overlay=""TimerHeaderTitle"" type=""text""></label><label><span>Title 1 font</span><select data-overlay=""TimerHeaderFontFamily"" data-font-select></select></label><label><span>Title 2</span><input data-overlay=""TimerTitle"" type=""text""></label><label><span>Title 2 font</span><select data-overlay=""TimerTitleFontFamily"" data-font-select></select></label><label><span>Subtitle</span><input data-overlay=""TimerSubtitle"" type=""text""></label><label><span>Subtitle font</span><select data-overlay=""TimerSubtitleFontFamily"" data-font-select></select></label><label><span>Start value, seconds</span><input data-overlay=""TimerStartSeconds"" type=""number""></label><label><span>Donation amount for one time step</span><input data-overlay=""TimerUnitAmount"" type=""number"" step=""0.01""></label><label><span>Seconds added for that amount</span><input data-overlay=""TimerSecondsPerUnit"" type=""number""></label><label><span>Maximum timer seconds, 0 = no limit</span><input data-overlay=""TimerMaxSeconds"" type=""number""></label><label><span>Currency</span><input data-overlay=""TimerCurrency"" type=""text""></label><p class=""note"">Example: amount 100 and seconds 3600 means 100 RUB = 60 min.</p></fieldset>
         <fieldset><legend>Timer visibility</legend><label class=""check-row""><input data-overlay=""TimerEnabled"" type=""checkbox""><span>Enable timer</span></label><label class=""check-row""><input data-overlay=""ShowPanelBackground"" type=""checkbox""><span>Show background</span></label><label class=""check-row""><input data-overlay=""TimerShowConversion"" type=""checkbox""><span>Show conversion line</span></label><label class=""check-row""><input data-overlay=""TimerShowServices"" type=""checkbox""><span>Show providers in timer</span></label></fieldset>
-        <fieldset><legend>Timer look</legend><label><span>Timer font</span><select data-overlay=""TimerFontFamily"" data-font-select></select></label><label><span>Title size</span><div class=""row""><input data-overlay=""TitleSize"" type=""range"" min=""10"" max=""96""><input data-overlay=""TitleSize"" type=""number""></div></label><label><span>Label size</span><div class=""row""><input data-overlay=""LabelSize"" type=""range"" min=""8"" max=""64""><input data-overlay=""LabelSize"" type=""number""></div></label><label><span>Meta size</span><div class=""row""><input data-overlay=""MetaSize"" type=""range"" min=""8"" max=""64""><input data-overlay=""MetaSize"" type=""number""></div></label><label><span>Timer width</span><div class=""row""><input data-overlay=""TimerWidth"" type=""range"" min=""80"" max=""1600""><input data-overlay=""TimerWidth"" type=""number""></div></label><label><span>Timer X</span><div class=""row""><input data-overlay=""TimerX"" type=""range"" min=""-800"" max=""800""><input data-overlay=""TimerX"" type=""number""></div></label><label><span>Timer Y</span><div class=""row""><input data-overlay=""TimerY"" type=""range"" min=""-600"" max=""600""><input data-overlay=""TimerY"" type=""number""></div></label><label><span>Timer align</span><select data-overlay=""TimerTextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label><span>Background opacity</span><div class=""row""><input data-overlay=""ContainerOpacity"" type=""range"" min=""0"" max=""1"" step=""0.01""><input data-overlay=""ContainerOpacity"" type=""number"" min=""0"" max=""1"" step=""0.01""></div></label><label class=""color-row""><span>Background</span><input data-overlay=""BackgroundColor"" type=""color""></label><label class=""color-row""><span>Text</span><input data-overlay=""TextColor"" type=""color""></label><label class=""color-row""><span>Muted</span><input data-overlay=""MutedColor"" type=""color""></label></fieldset>
+        <fieldset><legend>Timer look</legend><label><span>Timer font</span><select data-overlay=""TimerFontFamily"" data-font-select></select></label><label><span>Time font</span><select data-overlay=""TimerValueFontFamily"" data-font-select></select></label><label><span>Details font</span><select data-overlay=""TimerMetaFontFamily"" data-font-select></select></label><label><span>Conversion font</span><select data-overlay=""TimerConversionFontFamily"" data-font-select></select></label><label><span>Title size</span><div class=""row""><input data-overlay=""TitleSize"" type=""range"" min=""10"" max=""96""><input data-overlay=""TitleSize"" type=""number""></div></label><label><span>Label size</span><div class=""row""><input data-overlay=""LabelSize"" type=""range"" min=""8"" max=""64""><input data-overlay=""LabelSize"" type=""number""></div></label><label><span>Meta size</span><div class=""row""><input data-overlay=""MetaSize"" type=""range"" min=""8"" max=""64""><input data-overlay=""MetaSize"" type=""number""></div></label><label><span>Timer width</span><div class=""row""><input data-overlay=""TimerWidth"" type=""range"" min=""80"" max=""1600""><input data-overlay=""TimerWidth"" type=""number""></div></label><label><span>Timer X</span><div class=""row""><input data-overlay=""TimerX"" type=""range"" min=""-800"" max=""800""><input data-overlay=""TimerX"" type=""number""></div></label><label><span>Timer Y</span><div class=""row""><input data-overlay=""TimerY"" type=""range"" min=""-600"" max=""600""><input data-overlay=""TimerY"" type=""number""></div></label><label><span>Timer align</span><select data-overlay=""TimerTextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label><span>Background opacity</span><div class=""row""><input data-overlay=""ContainerOpacity"" type=""range"" min=""0"" max=""1"" step=""0.01""><input data-overlay=""ContainerOpacity"" type=""number"" min=""0"" max=""1"" step=""0.01""></div></label><label class=""color-row""><span>Background</span><input data-overlay=""BackgroundColor"" type=""color""></label><label class=""color-row""><span>Text</span><input data-overlay=""TextColor"" type=""color""></label><label class=""color-row""><span>Muted</span><input data-overlay=""MutedColor"" type=""color""></label></fieldset>
+        <fieldset><legend>Decor image</legend><label class=""check-row""><input data-overlay=""ShowTimerDecorImage"" type=""checkbox""><span>Show decor image</span></label><div class=""drop"" id=""timerDecorDrop"">Drop PNG/JPG/WebP here or click</div><input id=""timerDecorImageFile"" type=""file"" accept=""image/png,image/jpeg,image/webp,image/gif"" hidden><div class=""image-name"" id=""timerDecorImageName""></div><button type=""button"" id=""clearTimerDecorImage"">Clear image</button><label><span>Image X</span><div class=""row""><input data-overlay=""TimerDecorImageX"" type=""range"" min=""-800"" max=""800""><input data-overlay=""TimerDecorImageX"" type=""number""></div></label><label><span>Image Y</span><div class=""row""><input data-overlay=""TimerDecorImageY"" type=""range"" min=""-600"" max=""600""><input data-overlay=""TimerDecorImageY"" type=""number""></div></label><label><span>Image width</span><div class=""row""><input data-overlay=""TimerDecorImageWidth"" type=""range"" min=""20"" max=""1200""><input data-overlay=""TimerDecorImageWidth"" type=""number""></div></label><label><span>Image height</span><div class=""row""><input data-overlay=""TimerDecorImageHeight"" type=""range"" min=""0"" max=""1000""><input data-overlay=""TimerDecorImageHeight"" type=""number""></div></label><label><span>Image rotation</span><div class=""row""><input data-overlay=""TimerDecorImageRotation"" type=""range"" min=""-180"" max=""180""><input data-overlay=""TimerDecorImageRotation"" type=""number""></div></label></fieldset>
       </div>
 
       <div class=""pane"" data-pane=""credits"">
         <fieldset><legend>Credits presets</legend><div class=""presets"" id=""creditsPresets""></div></fieldset>
-        <fieldset><legend>Credits editor</legend><label class=""check-row""><input data-credits=""CreditsEnabled"" type=""checkbox""><span>Enable credits collection</span></label><div class=""buttons""><button type=""button"" id=""testCredits"">Show test credits</button><button type=""button"" id=""pauseCredits"">Pause credits preview</button><button type=""button"" id=""restartCredits"">Restart credits preview</button></div><p class=""note"">Enabled Streamer.bot sections are used automatically. Configure their visibility in Streamer.bot; DonConnect adds its donation section separately.</p><p class=""note"" id=""creditsSpeedNote"">Roll speed is calculated automatically from the amount of information.</p><label><span>Title</span><input data-credits=""Title"" type=""text""></label><label><span>Title font</span><select data-credits=""TitleFontFamily"" data-font-select></select></label><label><span>Subtitle</span><input data-credits=""Subtitle"" type=""text""></label><label><span>Outro</span><input data-credits=""Outro"" type=""text""></label></fieldset>
-        <fieldset><legend>DonConnect donations</legend><label><span>Donation section title</span><input data-credits=""SectionTitle"" type=""text""></label><label class=""check-row""><input data-credits=""ShowNames"" type=""checkbox""><span>Show donor names</span></label><label class=""check-row""><input data-credits=""ShowAmounts"" type=""checkbox""><span>Show amounts</span></label><label class=""check-row""><input data-credits=""ShowPlatforms"" type=""checkbox""><span>Show platforms</span></label><label class=""check-row""><input data-credits=""ShowMessages"" type=""checkbox""><span>Show messages</span></label><label><span>Details font</span><select data-credits=""DetailFontFamily"" data-font-select></select></label></fieldset>
+        <fieldset><legend>Credits editor</legend><label class=""check-row""><input data-credits=""CreditsEnabled"" type=""checkbox""><span>Enable credits collection</span></label><div class=""buttons""><button type=""button"" id=""testCredits"">Show test credits</button><button type=""button"" id=""pauseCredits"">Pause credits preview</button><button type=""button"" id=""restartCredits"">Restart credits preview</button></div><p class=""note"">Enabled Streamer.bot sections are used automatically. Configure their visibility in Streamer.bot; DonConnect adds its donation section separately.</p><p class=""note"" id=""creditsSpeedNote"">Move the slider right to make credits faster. With long-credits acceleration enabled, long rolls finish in the same overall window.</p><label><span>Credits speed</span><div class=""row""><input data-credits=""DurationSeconds"" type=""range"" min=""5"" max=""600""><input data-credits=""DurationSeconds"" type=""number"" min=""5"" max=""600""></div></label><label class=""check-row""><input data-credits=""LockDuration"" type=""checkbox""><span>Keep fixed speed for long credits</span></label><label><span>Title</span><input data-credits=""Title"" type=""text""></label><label><span>Title font</span><select data-credits=""TitleFontFamily"" data-font-select></select></label><label><span>Subtitle</span><input data-credits=""Subtitle"" type=""text""></label><label><span>Outro</span><input data-credits=""Outro"" type=""text""></label></fieldset>
+        <fieldset><legend>DonConnect donations</legend><label><span>Donation section title</span><input data-credits=""SectionTitle"" type=""text""></label><label><span>Section title font</span><select data-credits=""SectionTitleFontFamily"" data-font-select></select></label><div id=""creditsSectionRows"" class=""credits-section-rows""></div><textarea data-credits=""SectionLabels"" class=""hidden""></textarea><textarea data-credits=""SectionFonts"" class=""hidden""></textarea><p class=""note"" id=""creditsSectionsNote"">Each credits section can have its own display name and title font. Streamer.bot still decides which native sections are collected.</p><label class=""check-row""><input data-credits=""ShowNames"" type=""checkbox""><span>Show donor names</span></label><label class=""check-row""><input data-credits=""ShowAmounts"" type=""checkbox""><span>Show amounts</span></label><label class=""check-row""><input data-credits=""ShowPlatforms"" type=""checkbox""><span>Show platforms</span></label><label class=""check-row""><input data-credits=""ShowMessages"" type=""checkbox""><span>Show messages</span></label><label><span>Details font</span><select data-credits=""DetailFontFamily"" data-font-select></select></label></fieldset>
         <fieldset><legend>Credits look</legend><label><span>Base font</span><select data-credits=""FontFamily"" data-font-select></select></label><label><span>Width</span><div class=""row""><input data-credits=""Width"" type=""range"" min=""320"" max=""1920""><input data-credits=""Width"" type=""number""></div></label><label><span>Font size</span><div class=""row""><input data-credits=""FontSize"" type=""range"" min=""14"" max=""120""><input data-credits=""FontSize"" type=""number""></div></label><label class=""check-row""><input data-credits=""TransparentBackground"" type=""checkbox""><span>Transparent background</span></label><label class=""color-row""><span>Background</span><input data-credits=""BackgroundColor"" type=""color""></label><label class=""color-row""><span>Text</span><input data-credits=""TextColor"" type=""color""></label><label class=""color-row""><span>Muted</span><input data-credits=""MutedColor"" type=""color""></label><label class=""color-row""><span>Accent</span><input data-credits=""AccentColor"" type=""color""></label></fieldset>
       </div>
 
       <div class=""pane"" data-pane=""leaderboard"">
         <fieldset><legend>Leaderboard presets</legend><div class=""presets"" id=""leaderboardPresets""></div></fieldset>
-        <fieldset><legend>Leaderboard editor</legend><label class=""check-row""><input data-leaderboard=""Enabled"" type=""checkbox""><span>Enable leaderboard</span></label><label class=""check-row""><input data-leaderboard=""ShowTitle"" type=""checkbox""><span>Show title</span></label><label><span>Title</span><input data-leaderboard=""Title"" type=""text""></label><label><span>Mode</span><select data-leaderboard=""Mode""><option value=""overall"">Overall top</option><option value=""platform-slides"">Platform slides</option><option value=""recent"">Recent donations</option></select></label><label><span>Rows</span><input data-leaderboard=""TopCount"" type=""number"" min=""1"" max=""10""></label><label><span>Slide duration, ms</span><input data-leaderboard=""SlideDuration"" type=""number"" min=""1000"" max=""30000"" step=""500""></label><label class=""check-row""><input data-leaderboard=""ShowRanks"" type=""checkbox""><span>Show ranks</span></label><label class=""check-row""><input data-leaderboard=""ShowAmounts"" type=""checkbox""><span>Show amounts</span></label><label class=""check-row""><input data-leaderboard=""ShowPlatforms"" type=""checkbox""><span>Show platforms</span></label></fieldset>
-        <fieldset><legend>Leaderboard look</legend><label><span>Base font</span><select data-leaderboard=""FontFamily"" data-font-select></select></label><label><span>Title font</span><select data-leaderboard=""TitleFontFamily"" data-font-select></select></label><label><span>Amount font</span><select data-leaderboard=""AmountFontFamily"" data-font-select></select></label><label><span>Text align</span><select data-leaderboard=""TextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label><span>Width</span><div class=""row""><input data-leaderboard=""Width"" type=""range"" min=""240"" max=""1920""><input data-leaderboard=""Width"" type=""number""></div></label><label><span>Padding</span><div class=""row""><input data-leaderboard=""Padding"" type=""range"" min=""0"" max=""120""><input data-leaderboard=""Padding"" type=""number""></div></label><label><span>Border radius</span><div class=""row""><input data-leaderboard=""BorderRadius"" type=""range"" min=""0"" max=""120""><input data-leaderboard=""BorderRadius"" type=""number""></div></label><label><span>Font size</span><div class=""row""><input data-leaderboard=""FontSize"" type=""range"" min=""10"" max=""96""><input data-leaderboard=""FontSize"" type=""number""></div></label><label><span>Title size</span><div class=""row""><input data-leaderboard=""TitleSize"" type=""range"" min=""10"" max=""120""><input data-leaderboard=""TitleSize"" type=""number""></div></label><label><span>Row gap</span><div class=""row""><input data-leaderboard=""RowGap"" type=""range"" min=""0"" max=""48""><input data-leaderboard=""RowGap"" type=""number""></div></label><label><span>Opacity</span><div class=""row""><input data-leaderboard=""Opacity"" type=""range"" min=""0"" max=""1"" step=""0.01""><input data-leaderboard=""Opacity"" type=""number"" min=""0"" max=""1"" step=""0.01""></div></label><label class=""color-row""><span>Background</span><input data-leaderboard=""BackgroundColor"" type=""color""></label><label class=""color-row""><span>Text</span><input data-leaderboard=""TextColor"" type=""color""></label><label class=""color-row""><span>Muted</span><input data-leaderboard=""MutedColor"" type=""color""></label><label class=""color-row""><span>Accent</span><input data-leaderboard=""AccentColor"" type=""color""></label></fieldset>
+        <fieldset><legend>Leaderboard editor</legend><label class=""check-row""><input data-leaderboard=""Enabled"" type=""checkbox""><span>Enable leaderboard</span></label><label class=""check-row""><input data-leaderboard=""ShowTitle"" type=""checkbox""><span>Show title</span></label><label><span>Title</span><input data-leaderboard=""Title"" type=""text""></label><label><span>Mode</span><select data-leaderboard=""Mode""><option value=""overall"">Overall top</option><option value=""month"">Top this month</option><option value=""week"">Top this week</option><option value=""stream"">Top this stream</option><option value=""platform-slides"">Platform slides</option><option value=""recent"">Recent donations</option></select></label><label><span>Rows</span><input data-leaderboard=""TopCount"" type=""number"" min=""1"" max=""10""></label><label><span>Slide duration, ms</span><input data-leaderboard=""SlideDuration"" type=""number"" min=""1000"" max=""30000"" step=""500""></label><label><span>Slide animation</span><select data-leaderboard=""SlideAnimation""><option value=""fade"">Fade</option><option value=""slide"">Slide</option><option value=""none"">None</option></select></label><label class=""check-row""><input data-leaderboard=""ShowRanks"" type=""checkbox""><span>Show ranks</span></label><label class=""check-row""><input data-leaderboard=""ShowAmounts"" type=""checkbox""><span>Show amounts</span></label><label class=""check-row""><input data-leaderboard=""ShowPlatforms"" type=""checkbox""><span>Show platforms</span></label><label class=""check-row""><input data-leaderboard=""ResetOnStart"" type=""checkbox""><span>Clear leaderboard once per day on start</span></label></fieldset>
+        <fieldset><legend>Leaderboard look</legend><label><span>Base font</span><select data-leaderboard=""FontFamily"" data-font-select></select></label><label><span>Title font</span><select data-leaderboard=""TitleFontFamily"" data-font-select></select></label><label><span>Amount font</span><select data-leaderboard=""AmountFontFamily"" data-font-select></select></label><label><span>Text align</span><select data-leaderboard=""TextAlign""><option value=""left"">Left</option><option value=""center"">Center</option><option value=""right"">Right</option></select></label><label class=""check-row""><input data-leaderboard=""ShowDecorImage"" type=""checkbox""><span>Show decor image</span></label><div class=""drop"" id=""leaderboardMediaDrop"">Drop PNG/JPG/GIF/WebP here or click</div><input id=""leaderboardMediaFile"" type=""file"" accept=""image/png,image/jpeg,image/webp,image/gif"" multiple hidden><label><span>Decor image</span><select data-leaderboard=""DecorImageFile"" id=""leaderboardDecorSelect""></select></label><label><span>Decor fit</span><select data-leaderboard=""DecorImageFit""><option value=""contain"">Contain</option><option value=""cover"">Cover</option></select></label><label><span>Decor width</span><div class=""row""><input data-leaderboard=""DecorImageWidth"" type=""range"" min=""20"" max=""1600""><input data-leaderboard=""DecorImageWidth"" type=""number""></div></label><label><span>Decor height</span><div class=""row""><input data-leaderboard=""DecorImageHeight"" type=""range"" min=""20"" max=""1000""><input data-leaderboard=""DecorImageHeight"" type=""number""></div></label><label><span>Decor X</span><div class=""row""><input data-leaderboard=""DecorImageX"" type=""range"" min=""-800"" max=""800""><input data-leaderboard=""DecorImageX"" type=""number""></div></label><label><span>Decor Y</span><div class=""row""><input data-leaderboard=""DecorImageY"" type=""range"" min=""-600"" max=""600""><input data-leaderboard=""DecorImageY"" type=""number""></div></label><label><span>Decor rotation</span><div class=""row""><input data-leaderboard=""DecorImageRotation"" type=""range"" min=""-180"" max=""180""><input data-leaderboard=""DecorImageRotation"" type=""number""></div></label><label><span>Width</span><div class=""row""><input data-leaderboard=""Width"" type=""range"" min=""240"" max=""1920""><input data-leaderboard=""Width"" type=""number""></div></label><label><span>Padding</span><div class=""row""><input data-leaderboard=""Padding"" type=""range"" min=""0"" max=""120""><input data-leaderboard=""Padding"" type=""number""></div></label><label><span>Border radius</span><div class=""row""><input data-leaderboard=""BorderRadius"" type=""range"" min=""0"" max=""120""><input data-leaderboard=""BorderRadius"" type=""number""></div></label><label><span>Font size</span><div class=""row""><input data-leaderboard=""FontSize"" type=""range"" min=""10"" max=""96""><input data-leaderboard=""FontSize"" type=""number""></div></label><label><span>Title size</span><div class=""row""><input data-leaderboard=""TitleSize"" type=""range"" min=""10"" max=""120""><input data-leaderboard=""TitleSize"" type=""number""></div></label><label><span>Row gap</span><div class=""row""><input data-leaderboard=""RowGap"" type=""range"" min=""0"" max=""48""><input data-leaderboard=""RowGap"" type=""number""></div></label><label><span>Opacity</span><div class=""row""><input data-leaderboard=""Opacity"" type=""range"" min=""0"" max=""1"" step=""0.01""><input data-leaderboard=""Opacity"" type=""number"" min=""0"" max=""1"" step=""0.01""></div></label><label class=""color-row""><span>Background</span><input data-leaderboard=""BackgroundColor"" type=""color""></label><label class=""color-row""><span>Text</span><input data-leaderboard=""TextColor"" type=""color""></label><label class=""color-row""><span>Muted</span><input data-leaderboard=""MutedColor"" type=""color""></label><label class=""color-row""><span>Accent</span><input data-leaderboard=""AccentColor"" type=""color""></label></fieldset>
         <fieldset><legend>Leaderboard entries</legend><p class=""note"">Add a custom row or edit names from received donations. Deleting a row automatically moves the next place up.</p><div class=""compact-grid""><label><span>Name</span><input id=""leaderboardEntryName"" type=""text""></label><label><span>Amount</span><input id=""leaderboardEntryAmount"" type=""number"" value=""100"" step=""0.01""></label><label><span>Currency</span><input id=""leaderboardEntryCurrency"" type=""text"" value=""RUB""></label><label><span>Platform</span><input id=""leaderboardEntryPlatform"" type=""text"" value=""Manual""></label></div><button type=""button"" id=""addLeaderboardEntry"">Add custom row</button><div class=""media-grid"" id=""leaderboardEntries""></div></fieldset>
         <div class=""buttons""><button class=""warn"" id=""resetLeaderboardData"">Clear leaderboard data</button></div>
       </div>
@@ -9538,25 +10708,26 @@ public class DonConnectWidgetServer
       </div>
 
       <fieldset id=""testsPanel""><legend>Tests</legend><div class=""buttons"" id=""donationTestButtons""><button data-test=""50"">Test 50</button><button data-test=""500"">Test 500</button><button data-test=""long"">Test long message</button><button data-test=""anonymous"">Test anonymous donation</button></div><div id=""timerTestPanel"" class=""hidden""><p class=""note"">Add time manually when a donation came outside DonConnect. It affects only the timer.</p><div class=""compact-grid""><label><span>Amount</span><input id=""timerTestAmount"" type=""number"" value=""50"" step=""0.01""></label><label><span>Currency</span><input id=""timerTestCurrency"" type=""text"" value=""RUB""></label></div><button type=""button"" id=""sendTimerTest"">Add timer time</button></div></fieldset>
-      <div class=""buttons""><button class=""primary"" id=""save"">Save current editor</button><button class=""warn"" id=""reset"">Reset current editor</button><button id=""exportSettings"">Export settings</button><button id=""importSettings"">Import settings</button><input id=""importSettingsFile"" type=""file"" accept=""application/json,.json,.donconnect"" hidden><button id=""copy"">Copy current OBS URL</button></div><p class=""note"" id=""profileNote"">Profiles contain widget settings, but not provider tokens or media library files.</p>
+      <div class=""buttons""><button class=""primary"" id=""save"">Save current editor</button><button class=""warn"" id=""reset"">Reset current editor</button><button id=""exportSettings"">Export settings</button><button id=""importSettings"">Import settings</button><input id=""importSettingsFile"" type=""file"" accept=""application/json,.json,.donconnect"" hidden><button id=""copy"">Copy current OBS URL</button></div><p class=""note"" id=""profileNote"">Profiles contain widget settings and used media files, but not provider tokens.</p>
       <div class=""status"" id=""status""></div>
       <section class=""help""><h2>OBS steps</h2><ol><li>Choose a tab and adjust the widget.</li><li>Click Save current editor.</li><li>Add Browser Source in OBS.</li><li>Paste the current URL below.</li></ol><p class=""note obs-size"" id=""obsSize""></p><div class=""obs-url""><input id=""obsUrl"" type=""text"" readonly><button id=""copy2"">Copy</button></div></section>
     </section>
-    <section class=""preview""><div class=""preview-head""><span>Live preview</span><label class=""preview-toggle""><input id=""gridToggle"" type=""checkbox""><span id=""gridToggleLabel"">Grid</span></label></div><iframe id=""frame"" src=""/donconnect/widget?preview=1"" title=""Live preview""></iframe></section>
+    <section class=""preview""><div class=""preview-head""><span>Live preview</span><div class=""preview-tools""><label class=""preview-toggle""><input id=""gridToggle"" type=""checkbox""><span id=""gridToggleLabel"">Grid</span></label><label class=""preview-toggle""><input id=""snapToggle"" type=""checkbox""><span id=""snapToggleLabel"">Snap</span></label></div></div><aside class=""layers-panel hidden"" id=""layersPanel""><div class=""layers-head""><div class=""layers-title"" id=""layersTitle"">Layers</div><button type=""button"" class=""layers-reset"" id=""layersReset"" title=""Reset layer order"">↺</button></div><div class=""layers-list"" id=""layersList""></div></aside><iframe id=""frame"" src=""/donconnect/widget?preview=1"" title=""Live preview""></iframe></section>
   </main>
   <script>
     let active = 'donation';
     let lang = 'en';
     const fallbackFonts = { windows:['Segoe UI','Arial','Calibri','Verdana','Tahoma','Trebuchet MS','Georgia','Times New Roman','Consolas','Courier New','Impact','Comic Sans MS'], google:[] };
     let donation = {}; let overlay = {}; let credits = {}; let leaderboard = {}; let contentFilter = {}; let fonts = cloneFontCatalog(fallbackFonts); let speechVoices = { items:[] }; let alertMedia = { items:[], directory:'', maxUploadBytes:33554432 };
+    const editorUndo = []; const editorUndoLimit = 10; let controlUndoArmed = new WeakSet();
     let creditsTestMode = false;
     const urls = { donation:'/donconnect/widget', history:'/donconnect/dock', goal:'/donconnect/goal', timer:'/donconnect/timer', credits:'/donconnect/credits', leaderboard:'/donconnect/leaderboard', filter:'/donconnect/widget' };
     const serviceNames = ['DonationAlerts','StreamElements','Streamlabs','DonatePay RU','DonatePay EU','Donate.Stream','deStream','DonateX.gg','ODA','Generic API'];
-    const donationDefaults = { Width:680, Height:360, BorderRadius:18, Padding:26, FontSize:28, Opacity:.88, BackgroundColor:'#10131a', TextColor:'#f8fbff', AccentColor:'#35d07f', AnimationDuration:650, FontFamily:'Segoe UI', DonorFontFamily:'', AmountFontFamily:'', MessageFontFamily:'', PlatformFontFamily:'', DonorTemplate:'{donor}', AmountTemplate:'{amount} {currency}', MessageTemplate:'{message}', PlatformTemplate:'{platform}', ShowBackground:true, ShowProgressBar:false, ShowPlatform:true, DisplayDuration:9000, EntryAnimation:'fade', ExitAnimation:'fade', TextAnimation:'fade', MediaFile:'', SoundFile:'', TextSoundFile:'', MediaFit:'contain', MediaPlacement:'above', MediaWidth:260, MediaHeight:170, MediaX:0, MediaY:0, MediaRotation:0, TextAlign:'center', DonorX:0, DonorY:0, DonorWidth:0, DonorHeight:0, DonorRotation:0, AmountX:0, AmountY:0, AmountWidth:0, AmountHeight:0, AmountRotation:0, MessageX:0, MessageY:0, MessageWidth:0, MessageHeight:0, MessageRotation:0, PlatformX:0, PlatformY:0, PlatformWidth:0, PlatformHeight:0, PlatformRotation:0, SoundVolume:75, TextSoundVolume:45, SpeakDonation:false, SpeechReadDonor:true, SpeechReadAmount:true, SpeechReadPlatform:true, SpeechReadMessage:true, SpeechVoice:'', SpeechRate:1, SpeechPitch:1, SpeechVolume:85, VideoMuted:true, AlertRules:[], PresetName:'Minimal Dark', Language:'en' };
-    const overlayDefaults = { Mode:'both', GoalEnabled:true, GoalHeaderTitle:'Goal', GoalTitle:'Goal', GoalCurrent:'0', GoalTarget:'10000', GoalCurrency:'RUB', TimerEnabled:false, TimerHeaderTitle:'Timer', TimerTitle:'Timer', TimerSubtitle:'', TimerMode:'countdown', TimerStartSeconds:'0', TimerUnitAmount:'100', TimerSecondsPerUnit:'60', TimerMaxSeconds:'0', TimerCurrency:'RUB', TimerShowServices:false, TimerShowConversion:true, TimerX:0, TimerY:0, TimerWidth:680, TimerHeight:0, TimerRotation:0, TimerTitleX:0, TimerTitleY:0, TimerTitleWidth:0, TimerTitleHeight:0, TimerTitleRotation:0, TimerSubtitleX:0, TimerSubtitleY:0, TimerSubtitleWidth:0, TimerSubtitleHeight:0, TimerSubtitleRotation:0, TimerValueX:0, TimerValueY:0, TimerValueWidth:0, TimerValueHeight:0, TimerValueRotation:0, TimerMetaX:0, TimerMetaY:0, TimerMetaWidth:0, TimerMetaHeight:0, TimerMetaRotation:0, TimerConversionX:0, TimerConversionY:0, TimerConversionWidth:0, TimerConversionHeight:0, TimerConversionRotation:0, TimerTextAlign:'center', Width:920, BorderRadius:22, BarRadius:22, Padding:22, TitleSize:30, ValueSize:42, LabelSize:17, MetaSize:17, Opacity:.94, ContainerOpacity:.94, BarOpacity:1, ShowPanelBackground:true, ShowGoalBar:true, ShowGoalProgress:true, ShowGoalMeta:true, ShowGoalText:true, ShowGoalValue:true, ShowGoalImage:false, GoalImageDataUrl:'', GoalImageName:'', GoalImageMode:'reveal', GoalImageFit:'contain', GoalImageWidth:680, GoalImageHeight:220, GoalImageX:0, GoalImageY:0, GoalImageRotation:0, GoalBarVisualMode:'bar', GoalFillDirection:'horizontal', GoalBarLength:680, GoalBarX:0, GoalBarY:0, GoalBarRotation:0, ShowDecorImage:false, DecorImageDataUrl:'', DecorImageName:'', DecorImageX:0, DecorImageY:0, DecorImageWidth:220, DecorImageHeight:0, DecorImageRotation:0, FontFamily:'Segoe UI', GoalHeaderFontFamily:'', GoalTitleFontFamily:'', GoalValueFontFamily:'', ServicesFontFamily:'', LastDonationFontFamily:'', LastDonationFontSize:14, LastDonationTextAlign:'center', TimerFontFamily:'', BackgroundColor:'#10131a', TextColor:'#f8fbff', MutedColor:'#b8c0cc', AccentColor:'#7c3cff', BarColor:'#1e2026', ShowServices:true, ServicesTitle:'Connected providers', ServicesTextAlign:'center', ServicesFontSize:14, HiddenServices:[], ShowLastDonation:true, ShowLastDonor:true, ShowLastAmount:true, ShowLastPlatform:true, Bare:false, GoalFormat:'amount', GoalBarWidth:100, GoalBarHeight:84, GoalBarAlign:'center', GoalTextPlacement:'inside', GoalTextAlign:'center', GoalTextOffsetX:0, GoalTextOffsetY:0, GoalTextWidth:0, GoalTextHeight:0, GoalTextRotation:0, TitleX:0, TitleY:0, TitleWidth:0, TitleHeight:0, TitleRotation:0, GoalMetaX:0, GoalMetaY:0, GoalMetaWidth:0, GoalMetaHeight:0, GoalMetaRotation:0, ServicesX:0, ServicesY:0, ServicesWidth:0, ServicesHeight:0, ServicesRotation:0, LastDonationX:0, LastDonationY:0, LastDonationWidth:0, LastDonationHeight:0, LastDonationRotation:0 };
-    const creditsDefaults = { CreditsEnabled:true, UseNativeCredits:true, UseTestData:false, Title:'Thanks for watching', Subtitle:'Today with us', Outro:'See you next stream', Duration:'70s', DurationSeconds:70, LockDuration:false, DonationFields:'name,amount,message', SectionTitle:'Donations', ShowNames:true, ShowAmounts:true, ShowPlatforms:true, ShowMessages:true, HiddenSections:[], TransparentBackground:true, Width:1120, FontSize:48, FontFamily:'Segoe UI', TitleFontFamily:'', DetailFontFamily:'', BackgroundColor:'#000000', TextColor:'#f7f4ec', MutedColor:'#b9d8d2', AccentColor:'#ffcf5a', ShadowColor:'rgba(0,0,0,.7)' };
-    const leaderboardDefaults = { Enabled:true, Title:'Top donors', Mode:'overall', TopCount:5, SlideDuration:5000, ShowTitle:true, ShowRanks:true, ShowAmounts:true, ShowPlatforms:true, Width:560, Padding:18, BorderRadius:16, FontSize:22, TitleSize:26, RowGap:8, Opacity:.94, TextAlign:'left', BackgroundColor:'#10131a', TextColor:'#f8fbff', MutedColor:'#b8c0cc', AccentColor:'#7c3cff', FontFamily:'Segoe UI', TitleFontFamily:'', AmountFontFamily:'' };
-    const donationPresets = { 'Minimal Dark':{ Width:680, Height:360, BorderRadius:18, Padding:26, FontSize:28, TextAlign:'center', MediaPlacement:'above', FontFamily:'Segoe UI', BackgroundColor:'#10131a', TextColor:'#f8fbff', AccentColor:'#35d07f', AnimationDuration:650 }, 'Clean Light':{ Width:720, Height:320, BorderRadius:10, Padding:28, FontSize:27, TextAlign:'left', MediaPlacement:'left', FontFamily:'Georgia', BackgroundColor:'#ffffff', TextColor:'#18212b', AccentColor:'#2c7be5', AnimationDuration:500 }, 'Twitch Style':{ Width:760, Height:380, BorderRadius:4, Padding:30, FontSize:30, TextAlign:'center', MediaPlacement:'above', FontFamily:'Trebuchet MS', BackgroundColor:'#18111f', TextColor:'#ffffff', AccentColor:'#9146ff', AnimationDuration:700 }, 'Neon':{ Width:780, Height:400, BorderRadius:24, Padding:30, FontSize:31, TextAlign:'center', MediaPlacement:'background', FontFamily:'Consolas', BackgroundColor:'#070812', TextColor:'#ecfbff', AccentColor:'#00f5ff', AnimationDuration:850 }, 'Mobile Compact':{ Width:440, Height:230, BorderRadius:12, Padding:16, FontSize:20, TextAlign:'center', MediaPlacement:'right', FontFamily:'Tahoma', BackgroundColor:'#111827', TextColor:'#f9fafb', AccentColor:'#f59e0b', AnimationDuration:450 } };
+    const donationDefaults = { Width:680, Height:360, BorderRadius:18, Padding:26, FontSize:28, Opacity:.88, BackgroundColor:'#10131a', TextColor:'#f8fbff', AccentColor:'#35d07f', AnimationDuration:650, EntryAnimationDuration:650, ExitAnimationDuration:650, FontFamily:'Segoe UI', DonorFontFamily:'', AmountFontFamily:'', MessageFontFamily:'', PlatformFontFamily:'', DonorFontSize:28, AmountFontSize:25, MessageFontSize:20, PlatformFontSize:16, DonorTemplate:'{donor}', AmountTemplate:'{amount} {currency}', MessageTemplate:'{message}', PlatformTemplate:'{platform}', ShowBackground:true, ShowProgressBar:false, ShowDonor:true, ShowAmount:true, ShowMessage:true, ShowPlatform:true, ShowMedia:true, DisplayDuration:9000, EntryAnimation:'fade', ExitAnimation:'fade', TextAnimation:'fade', MediaFile:'', SoundFile:'', TextSoundFile:'', MediaFit:'contain', MediaPlacement:'above', MediaWidth:260, MediaHeight:170, MediaX:0, MediaY:0, MediaRotation:0, ShowDecorImage:false, DecorImageFile:'', DecorImageFit:'contain', DecorImageWidth:220, DecorImageHeight:160, DecorImageX:0, DecorImageY:0, DecorImageRotation:0, TextAlign:'center', DonorX:0, DonorY:0, DonorWidth:0, DonorHeight:0, DonorRotation:0, AmountX:0, AmountY:0, AmountWidth:0, AmountHeight:0, AmountRotation:0, MessageX:0, MessageY:0, MessageWidth:0, MessageHeight:0, MessageRotation:0, PlatformX:0, PlatformY:0, PlatformWidth:0, PlatformHeight:0, PlatformRotation:0, SoundVolume:75, TextSoundVolume:45, SpeakDonation:false, SpeechReadDonor:true, SpeechReadAmount:true, SpeechReadPlatform:true, SpeechReadMessage:true, SpeechVoice:'', SpeechRate:1, SpeechPitch:1, SpeechVolume:85, VideoMuted:true, AlertRules:[], LayerOrder:['background','decor','media','donor','amount','message','platform'], PresetName:'Minimal Dark', Language:'en' };
+    const overlayDefaults = { Mode:'both', GoalEnabled:true, GoalHeaderTitle:'Goal', GoalTitle:'Goal', GoalCurrent:'0', GoalTarget:'10000', GoalCurrency:'RUB', GoalDeadlineEnabled:false, GoalDeadlineTitle:'Сбор закончится через', GoalDeadlineEndsAt:'', GoalDeadlineExpiredText:'Сбор завершен', GoalDeadlineShowDate:true, GoalDeadlineFontFamily:'', GoalDeadlineFontSize:18, GoalDeadlineTextAlign:'center', GoalDeadlineX:0, GoalDeadlineY:0, GoalDeadlineWidth:0, GoalDeadlineHeight:0, GoalDeadlineRotation:0, TimerEnabled:false, TimerHeaderTitle:'Timer', TimerTitle:'Timer', TimerSubtitle:'', TimerMode:'countdown', TimerStartSeconds:'0', TimerUnitAmount:'100', TimerSecondsPerUnit:'60', TimerMaxSeconds:'0', TimerCurrency:'RUB', TimerShowServices:false, TimerShowConversion:true, TimerX:0, TimerY:0, TimerWidth:680, TimerHeight:0, TimerRotation:0, TimerHeaderX:0, TimerHeaderY:0, TimerHeaderWidth:0, TimerHeaderHeight:0, TimerHeaderRotation:0, TimerTitleX:0, TimerTitleY:0, TimerTitleWidth:0, TimerTitleHeight:0, TimerTitleRotation:0, TimerSubtitleX:0, TimerSubtitleY:0, TimerSubtitleWidth:0, TimerSubtitleHeight:0, TimerSubtitleRotation:0, TimerValueX:0, TimerValueY:0, TimerValueWidth:0, TimerValueHeight:0, TimerValueRotation:0, TimerMetaX:0, TimerMetaY:0, TimerMetaWidth:0, TimerMetaHeight:0, TimerMetaRotation:0, TimerConversionX:0, TimerConversionY:0, TimerConversionWidth:0, TimerConversionHeight:0, TimerConversionRotation:0, TimerTextAlign:'center', Width:920, PanelHeight:0, BorderRadius:22, BarRadius:22, Padding:22, TitleSize:30, ValueSize:42, LabelSize:17, MetaSize:17, Opacity:.94, ContainerOpacity:.94, BarOpacity:1, ShowPanelBackground:true, ShowGoalBar:true, ShowGoalProgress:true, ShowGoalMeta:true, ShowGoalText:true, ShowGoalValue:true, ShowGoalImage:false, GoalImageDataUrl:'', GoalImageName:'', GoalImageMode:'reveal', GoalImageFit:'contain', GoalImageWidth:680, GoalImageHeight:220, GoalImageX:0, GoalImageY:0, GoalImageRotation:0, GoalBarVisualMode:'bar', GoalFillDirection:'horizontal', GoalBarLength:680, GoalBarX:0, GoalBarY:0, GoalBarRotation:0, ShowDecorImage:false, DecorImageDataUrl:'', DecorImageName:'', DecorImageX:0, DecorImageY:0, DecorImageWidth:220, DecorImageHeight:0, DecorImageRotation:0, ShowTimerDecorImage:false, TimerDecorImageDataUrl:'', TimerDecorImageName:'', TimerDecorImageX:0, TimerDecorImageY:0, TimerDecorImageWidth:220, TimerDecorImageHeight:0, TimerDecorImageRotation:0, FontFamily:'Segoe UI', GoalHeaderFontFamily:'', GoalTitleFontFamily:'', GoalValueFontFamily:'', ServicesFontFamily:'', LastDonationFontFamily:'', LastDonationFontSize:14, LastDonationTextAlign:'center', TimerFontFamily:'', TimerHeaderFontFamily:'', TimerTitleFontFamily:'', TimerSubtitleFontFamily:'', TimerValueFontFamily:'', TimerMetaFontFamily:'', TimerConversionFontFamily:'', BackgroundColor:'#10131a', TextColor:'#f8fbff', MutedColor:'#b8c0cc', AccentColor:'#7c3cff', BarColor:'#1e2026', ShowServices:true, ServicesTitle:'Connected providers', ServicesTextAlign:'center', ServicesFontSize:14, HiddenServices:[], GoalLayerOrder:['background','decor','goalBar','goalImage','goalText','goalMeta','goalDeadline','services','last','title'], TimerLayerOrder:['background','decor','title','timerBlock','timerTitle','timerSubtitle','timerValue','timerMeta','timerConversion','services'], ShowLastDonation:true, ShowLastDonor:true, ShowLastAmount:true, ShowLastPlatform:true, Bare:false, GoalFormat:'amount', GoalBarWidth:100, GoalBarHeight:84, GoalBarAlign:'center', GoalTextPlacement:'inside', GoalTextAlign:'center', GoalTextOffsetX:0, GoalTextOffsetY:0, GoalTextWidth:0, GoalTextHeight:0, GoalTextRotation:0, TitleX:0, TitleY:0, TitleWidth:0, TitleHeight:0, TitleRotation:0, GoalMetaX:0, GoalMetaY:0, GoalMetaWidth:0, GoalMetaHeight:0, GoalMetaRotation:0, ServicesX:0, ServicesY:0, ServicesWidth:0, ServicesHeight:0, ServicesRotation:0, LastDonationX:0, LastDonationY:0, LastDonationWidth:0, LastDonationHeight:0, LastDonationRotation:0 };
+    const creditsDefaults = { CreditsEnabled:true, UseNativeCredits:true, UseTestData:false, Title:'Thanks for watching', Subtitle:'Today with us', Outro:'See you next stream', Duration:'180s', DurationSeconds:180, LockDuration:false, DonationFields:'name,amount,message', SectionTitle:'Donations', SectionLabels:'Follows=Follows; Cheers=Cheers; Subs=Subs; ReSubs=ReSubs; Gift Subs=Gift Subs; Gift Bombs=Gift Bombs; Raids=Raids; Donations=Donations', SectionFonts:'', ShowNames:true, ShowAmounts:true, ShowPlatforms:true, ShowMessages:true, HiddenSections:[], TransparentBackground:true, Width:1120, FontSize:48, FontFamily:'Segoe UI', TitleFontFamily:'', SectionTitleFontFamily:'', DetailFontFamily:'', BackgroundColor:'#000000', TextColor:'#f7f4ec', MutedColor:'#b9d8d2', AccentColor:'#ffcf5a', ShadowColor:'rgba(0,0,0,.7)' };
+    const leaderboardDefaults = { Enabled:true, Title:'Top donors', Mode:'overall', TopCount:5, SlideDuration:5000, SlideAnimation:'fade', ShowTitle:true, ShowRanks:true, ShowAmounts:true, ShowPlatforms:true, ResetOnStart:false, ShowDecorImage:false, DecorImageFile:'', DecorImageFit:'contain', DecorImageWidth:220, DecorImageHeight:160, DecorImageX:0, DecorImageY:0, DecorImageRotation:0, Width:560, Padding:18, BorderRadius:16, FontSize:22, TitleSize:26, RowGap:8, Opacity:.94, TextAlign:'left', BackgroundColor:'#10131a', TextColor:'#f8fbff', MutedColor:'#b8c0cc', AccentColor:'#7c3cff', FontFamily:'Segoe UI', TitleFontFamily:'', AmountFontFamily:'' };
+    const donationPresets = { 'Minimal Dark':{ Width:680, Height:360, BorderRadius:18, Padding:26, FontSize:28, DonorFontSize:28, AmountFontSize:25, MessageFontSize:20, PlatformFontSize:16, TextAlign:'center', MediaPlacement:'above', FontFamily:'Segoe UI', BackgroundColor:'#10131a', TextColor:'#f8fbff', AccentColor:'#35d07f', AnimationDuration:650 }, 'Clean Light':{ Width:720, Height:320, BorderRadius:10, Padding:28, FontSize:27, DonorFontSize:30, AmountFontSize:23, MessageFontSize:19, PlatformFontSize:14, TextAlign:'left', MediaPlacement:'left', FontFamily:'Georgia', BackgroundColor:'#ffffff', TextColor:'#18212b', AccentColor:'#2c7be5', AnimationDuration:500 }, 'Twitch Style':{ Width:760, Height:380, BorderRadius:4, Padding:30, FontSize:30, DonorFontSize:34, AmountFontSize:29, MessageFontSize:21, PlatformFontSize:15, TextAlign:'center', MediaPlacement:'above', FontFamily:'Trebuchet MS', BackgroundColor:'#18111f', TextColor:'#ffffff', AccentColor:'#9146ff', AnimationDuration:700 }, 'Neon':{ Width:780, Height:400, BorderRadius:24, Padding:30, FontSize:31, DonorFontSize:36, AmountFontSize:30, MessageFontSize:22, PlatformFontSize:15, TextAlign:'center', MediaPlacement:'background', FontFamily:'Consolas', BackgroundColor:'#070812', TextColor:'#ecfbff', AccentColor:'#00f5ff', AnimationDuration:850 }, 'Mobile Compact':{ Width:440, Height:230, BorderRadius:12, Padding:16, FontSize:20, DonorFontSize:22, AmountFontSize:19, MessageFontSize:15, PlatformFontSize:11, TextAlign:'center', MediaPlacement:'right', FontFamily:'Tahoma', BackgroundColor:'#111827', TextColor:'#f9fafb', AccentColor:'#f59e0b', AnimationDuration:450, EntryAnimationDuration:450, ExitAnimationDuration:450 } };
     const timerPresets = { 'Studio Clock':{ TimerWidth:620, TimerFontFamily:'Segoe UI', TitleSize:34, ValueSize:64, MetaSize:18, BackgroundColor:'#10131a', TextColor:'#f8fbff', MutedColor:'#b8c0cc', AccentColor:'#35d07f' }, 'Arcade Extend':{ TimerWidth:720, TimerFontFamily:'Consolas', TitleSize:30, ValueSize:72, MetaSize:19, BackgroundColor:'#10131a', TextColor:'#ffffff', MutedColor:'#84f1ff', AccentColor:'#00f5ff' }, 'Clean Broadcast':{ TimerWidth:680, TimerFontFamily:'Georgia', TitleSize:28, ValueSize:62, MetaSize:17, BackgroundColor:'#ffffff', TextColor:'#17202a', MutedColor:'#536170', AccentColor:'#2c7be5' }, 'Count Up Live':{ TimerWidth:660, TimerMode:'countup-reset', TimerFontFamily:'Trebuchet MS', TitleSize:28, ValueSize:68, MetaSize:17, BackgroundColor:'#18111f', TextColor:'#ffffff', MutedColor:'#d3c2e8', AccentColor:'#9146ff' } };
     const creditsPresets = { 'Classic':{ FontFamily:'Segoe UI', TitleFontFamily:'Georgia', TextColor:'#f7f4ec', MutedColor:'#b9d8d2', AccentColor:'#ffcf5a', Width:1120, FontSize:48 }, 'Cinema':{ FontFamily:'Georgia', TitleFontFamily:'Times New Roman', TextColor:'#ffffff', MutedColor:'#d6d6d6', AccentColor:'#ffcf5a', Width:1240, FontSize:50 }, 'Pixel Party':{ FontFamily:'Consolas', TitleFontFamily:'Impact', TextColor:'#f7fbff', MutedColor:'#a5f3fc', AccentColor:'#fb7185', Width:1080, FontSize:44 }, 'Clean':{ FontFamily:'Segoe UI', TitleFontFamily:'Trebuchet MS', TextColor:'#17202a', MutedColor:'#536170', AccentColor:'#2c7be5', BackgroundColor:'#ffffff', Width:1120, FontSize:46 } };
     const leaderboardPresets = { 'Compact Dark':{ FontFamily:'Segoe UI', Width:620, FontSize:24, TitleSize:30, BackgroundColor:'#10131a', TextColor:'#f8fbff', MutedColor:'#b8c0cc', AccentColor:'#7c3cff' }, 'Sports Board':{ FontFamily:'Impact', AmountFontFamily:'Consolas', Width:720, FontSize:28, TitleSize:38, BackgroundColor:'#141414', TextColor:'#ffffff', MutedColor:'#cccccc', AccentColor:'#ffcf5a' }, 'Clean List':{ FontFamily:'Georgia', Width:680, FontSize:24, TitleSize:32, BackgroundColor:'#ffffff', TextColor:'#17202a', MutedColor:'#536170', AccentColor:'#2c7be5' }, 'Neon Top':{ FontFamily:'Consolas', Width:700, FontSize:25, TitleSize:34, BackgroundColor:'#070812', TextColor:'#ecfbff', MutedColor:'#8bdcff', AccentColor:'#00f5ff' } };
@@ -9567,7 +10738,9 @@ public class DonConnectWidgetServer
       ru: { appTitle:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u044b DonConnect', language:'\u042f\u0437\u044b\u043a', donation:'\u0414\u043e\u043d\u0430\u0442', goal:'\u0426\u0435\u043b\u044c', timer:'\u0422\u0430\u0439\u043c\u0435\u0440', credits:'\u0422\u0438\u0442\u0440\u044b', donationPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u0434\u043e\u043d\u0430\u0442\u0430', donationSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0434\u043e\u043d\u0430\u0442\u0430', donationColors:'\u0426\u0432\u0435\u0442\u0430 \u0434\u043e\u043d\u0430\u0442\u0430', donationTemplates:'\u0428\u0430\u0431\u043b\u043e\u043d\u044b \u0434\u043e\u043d\u0430\u0442\u0430', goalEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0446\u0435\u043b\u0438', goalLook:'\u0412\u0438\u0434 \u0446\u0435\u043b\u0438', timerEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerLook:'\u0412\u0438\u0434 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', creditsEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0442\u0438\u0442\u0440\u043e\u0432', creditsLook:'\u0412\u0438\u0434 \u0442\u0438\u0442\u0440\u043e\u0432', tests:'\u0422\u0435\u0441\u0442\u044b', width:'\u0428\u0438\u0440\u0438\u043d\u0430', height:'\u0412\u044b\u0441\u043e\u0442\u0430', borderRadius:'\u0421\u043a\u0440\u0443\u0433\u043b\u0435\u043d\u0438\u0435', padding:'\u041e\u0442\u0441\u0442\u0443\u043f\u044b', fontSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0448\u0440\u0438\u0444\u0442\u0430', opacity:'\u041f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c', animationMs:'\u0410\u043d\u0438\u043c\u0430\u0446\u0438\u044f, \u043c\u0441', background:'\u0424\u043e\u043d', text:'\u0422\u0435\u043a\u0441\u0442', accent:'\u0410\u043a\u0446\u0435\u043d\u0442', donor:'\u0418\u043c\u044f \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', amount:'\u0421\u0443\u043c\u043c\u0430', message:'\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435', enableGoal:'\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0446\u0435\u043b\u044c', title:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', current:'\u0421\u0435\u0439\u0447\u0430\u0441', target:'\u0426\u0435\u043b\u044c', currency:'\u0412\u0430\u043b\u044e\u0442\u0430', format:'\u0424\u043e\u0440\u043c\u0430\u0442', formatAmount:'\u0421\u0443\u043c\u043c\u0430', formatPercent:'\u041f\u0440\u043e\u0446\u0435\u043d\u0442', formatSummary:'\u0418\u0442\u043e\u0433', radius:'\u0420\u0430\u0434\u0438\u0443\u0441', valueSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0447\u0438\u0441\u0435\u043b', enableTimer:'\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0442\u0430\u0439\u043c\u0435\u0440', startSeconds:'\u0421\u0442\u0430\u0440\u0442, \u0441\u0435\u043a\u0443\u043d\u0434\u044b', donationAmountStep:'\u0421\u0443\u043c\u043c\u0430 \u0437\u0430 \u0448\u0430\u0433', secondsPerStep:'\u0421\u0435\u043a\u0443\u043d\u0434 \u0437\u0430 \u0448\u0430\u0433', maxSeconds:'\u041c\u0430\u043a\u0441. \u0441\u0435\u043a\u0443\u043d\u0434, 0 = \u0431\u0435\u0437 \u043b\u0438\u043c\u0438\u0442\u0430', titleSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430', labelSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u043f\u043e\u0434\u043f\u0438\u0441\u0435\u0439', metaSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0434\u0435\u0442\u0430\u043b\u0435\u0439', muted:'\u0412\u0442\u043e\u0440\u0438\u0447\u043d\u044b\u0439', bar:'\u041f\u043e\u043b\u043e\u0441\u0430', enableCredits:'\u0421\u043e\u0431\u0438\u0440\u0430\u0442\u044c \u0442\u0438\u0442\u0440\u044b', subtitle:'\u041f\u043e\u0434\u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', outro:'\u0424\u0438\u043d\u0430\u043b', rollDuration:'\u0414\u043b\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c', fields:'\u041f\u043e\u043b\u044f', test50:'\u0422\u0435\u0441\u0442 50', test500:'\u0422\u0435\u0441\u0442 500', testLong:'\u0414\u043b\u0438\u043d\u043d\u044b\u0439 \u0442\u0435\u043a\u0441\u0442', testAnonymous:'\u0410\u043d\u043e\u043d\u0438\u043c\u043d\u044b\u0439 \u0434\u043e\u043d\u0430\u0442', save:'\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c', reset:'\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c', copyCurrent:'\u0421\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u0442\u044c URL \u0434\u043b\u044f OBS', copy:'\u041a\u043e\u043f\u0438\u044f', obsSteps:'\u041a\u0430\u043a \u0432\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0432 OBS', obs1:'\u0412\u044b\u0431\u0435\u0440\u0438 \u0432\u043a\u043b\u0430\u0434\u043a\u0443 \u0438 \u043d\u0430\u0441\u0442\u0440\u043e\u0439 \u0432\u0438\u0434\u0436\u0435\u0442.', obs2:'\u041d\u0430\u0436\u043c\u0438 \u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c.', obs3:'\u0412 OBS \u0434\u043e\u0431\u0430\u0432\u044c \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a Browser.', obs4:'\u0412\u0441\u0442\u0430\u0432\u044c URL \u0441\u043d\u0438\u0437\u0443.', livePreview:'Live preview', settingsSaved:'\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u044b', testSent:'\u0422\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u0434\u043e\u043d\u0430\u0442 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d', copied:'URL \u0434\u043b\u044f OBS \u0441\u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d: ', promptTitle:'URL \u0434\u043b\u044f OBS Browser Source' },
       uk: { appTitle:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u0438 DonConnect', language:'\u041c\u043e\u0432\u0430', donation:'\u0414\u043e\u043d\u0430\u0442', goal:'\u0426\u0456\u043b\u044c', timer:'\u0422\u0430\u0439\u043c\u0435\u0440', credits:'\u0422\u0438\u0442\u0440\u0438', donationPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u0434\u043e\u043d\u0430\u0442\u0443', donationSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0434\u043e\u043d\u0430\u0442\u0443', donationColors:'\u041a\u043e\u043b\u044c\u043e\u0440\u0438 \u0434\u043e\u043d\u0430\u0442\u0443', donationTemplates:'\u0428\u0430\u0431\u043b\u043e\u043d\u0438 \u0434\u043e\u043d\u0430\u0442\u0443', goalEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0446\u0456\u043b\u0456', goalLook:'\u0412\u0438\u0433\u043b\u044f\u0434 \u0446\u0456\u043b\u0456', timerEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerLook:'\u0412\u0438\u0433\u043b\u044f\u0434 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', creditsEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u0442\u0438\u0442\u0440\u0456\u0432', creditsLook:'\u0412\u0438\u0433\u043b\u044f\u0434 \u0442\u0438\u0442\u0440\u0456\u0432', tests:'\u0422\u0435\u0441\u0442\u0438', width:'\u0428\u0438\u0440\u0438\u043d\u0430', height:'\u0412\u0438\u0441\u043e\u0442\u0430', borderRadius:'\u0417\u0430\u043e\u043a\u0440\u0443\u0433\u043b\u0435\u043d\u043d\u044f', padding:'\u0412\u0456\u0434\u0441\u0442\u0443\u043f\u0438', fontSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0448\u0440\u0438\u0444\u0442\u0443', opacity:'\u041f\u0440\u043e\u0437\u043e\u0440\u0456\u0441\u0442\u044c', animationMs:'\u0410\u043d\u0456\u043c\u0430\u0446\u0456\u044f, \u043c\u0441', background:'\u0424\u043e\u043d', text:'\u0422\u0435\u043a\u0441\u0442', accent:'\u0410\u043a\u0446\u0435\u043d\u0442', donor:'\u0406\u043c\u044f \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', amount:'\u0421\u0443\u043c\u0430', message:'\u041f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f', enableGoal:'\u0423\u0432\u0456\u043c\u043a\u043d\u0443\u0442\u0438 \u0446\u0456\u043b\u044c', title:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', current:'\u0417\u0430\u0440\u0430\u0437', target:'\u0426\u0456\u043b\u044c', currency:'\u0412\u0430\u043b\u044e\u0442\u0430', format:'\u0424\u043e\u0440\u043c\u0430\u0442', formatAmount:'\u0421\u0443\u043c\u0430', formatPercent:'\u0412\u0456\u0434\u0441\u043e\u0442\u043e\u043a', formatSummary:'\u041f\u0456\u0434\u0441\u0443\u043c\u043e\u043a', radius:'\u0420\u0430\u0434\u0456\u0443\u0441', valueSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0447\u0438\u0441\u0435\u043b', enableTimer:'\u0423\u0432\u0456\u043c\u043a\u043d\u0443\u0442\u0438 \u0442\u0430\u0439\u043c\u0435\u0440', startSeconds:'\u0421\u0442\u0430\u0440\u0442, \u0441\u0435\u043a\u0443\u043d\u0434\u0438', donationAmountStep:'\u0421\u0443\u043c\u0430 \u0437\u0430 \u043a\u0440\u043e\u043a', secondsPerStep:'\u0421\u0435\u043a\u0443\u043d\u0434 \u0437\u0430 \u043a\u0440\u043e\u043a', maxSeconds:'\u041c\u0430\u043a\u0441. \u0441\u0435\u043a\u0443\u043d\u0434, 0 = \u0431\u0435\u0437 \u043b\u0456\u043c\u0456\u0442\u0443', titleSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430', labelSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u043f\u0456\u0434\u043f\u0438\u0441\u0456\u0432', metaSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0434\u0435\u0442\u0430\u043b\u0435\u0439', muted:'\u0414\u0440\u0443\u0433\u043e\u0440\u044f\u0434\u043d\u0438\u0439', bar:'\u0421\u043c\u0443\u0433\u0430', enableCredits:'\u0417\u0431\u0438\u0440\u0430\u0442\u0438 \u0442\u0438\u0442\u0440\u0438', subtitle:'\u041f\u0456\u0434\u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', outro:'\u0424\u0456\u043d\u0430\u043b', rollDuration:'\u0422\u0440\u0438\u0432\u0430\u043b\u0456\u0441\u0442\u044c', fields:'\u041f\u043e\u043b\u044f', test50:'\u0422\u0435\u0441\u0442 50', test500:'\u0422\u0435\u0441\u0442 500', testLong:'\u0414\u043e\u0432\u0433\u0438\u0439 \u0442\u0435\u043a\u0441\u0442', testAnonymous:'\u0410\u043d\u043e\u043d\u0456\u043c\u043d\u0438\u0439 \u0434\u043e\u043d\u0430\u0442', save:'\u0417\u0431\u0435\u0440\u0435\u0433\u0442\u0438', reset:'\u0421\u043a\u0438\u043d\u0443\u0442\u0438', copyCurrent:'\u0421\u043a\u043e\u043f\u0456\u044e\u0432\u0430\u0442\u0438 URL \u0434\u043b\u044f OBS', copy:'\u041a\u043e\u043f\u0456\u044f', obsSteps:'\u042f\u043a \u0432\u0441\u0442\u0430\u0432\u0438\u0442\u0438 \u0432 OBS', obs1:'\u0412\u0438\u0431\u0435\u0440\u0438 \u0432\u043a\u043b\u0430\u0434\u043a\u0443 \u0456 \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0439 \u0432\u0456\u0434\u0436\u0435\u0442.', obs2:'\u041d\u0430\u0442\u0438\u0441\u043d\u0438 \u0417\u0431\u0435\u0440\u0435\u0433\u0442\u0438.', obs3:'\u0412 OBS \u0434\u043e\u0434\u0430\u0439 \u0434\u0436\u0435\u0440\u0435\u043b\u043e Browser.', obs4:'\u0412\u0441\u0442\u0430\u0432 URL \u043d\u0438\u0436\u0447\u0435.', livePreview:'Live preview', settingsSaved:'\u041d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u043d\u044f \u0437\u0431\u0435\u0440\u0435\u0436\u0435\u043d\u043e', testSent:'\u0422\u0435\u0441\u0442\u043e\u0432\u0438\u0439 \u0434\u043e\u043d\u0430\u0442 \u043d\u0430\u0434\u0456\u0441\u043b\u0430\u043d\u043e', copied:'URL \u0434\u043b\u044f OBS \u0441\u043a\u043e\u043f\u0456\u0439\u043e\u0432\u0430\u043d\u043e: ', promptTitle:'URL \u0434\u043b\u044f OBS Browser Source' }
     };
-    Object.assign(i18n.en, { goalPresets:'Goal presets', goalText:'Goal text', goalBar:'Goal bar', goalImage:'Goal image', lastDonation:'Last donation', connectedServices:'Connected services', textPlacement:'Text placement', insideBar:'Inside bar', aboveBar:'Above bar', belowBar:'Below bar', textAlign:'Text align', left:'Left', center:'Center', right:'Right', textX:'Text X', textY:'Text Y', panelWidth:'Panel width', barWidth:'Bar width, %', barHeight:'Bar height', barAlign:'Bar align', boxRadius:'Box radius', barRadius:'Bar radius', fill:'Fill', emptyBar:'Empty bar', showServices:'Show connected services', servicesTitle:'Services title', servicesAlign:'Services align', servicesSize:'Services size', title1:'Title 1', title2:'Title 2', containerOpacity:'Background opacity', barOpacity:'Bar opacity', showLastDonor:'Show last donor', showLastAmount:'Show last amount', showLastPlatform:'Show last platform', showGoalText:'Show goal text', showGoalValue:'Show amount text', showGoalMeta:'Show progress number', showGoalBar:'Show bar', showGoalProgress:'Show progress fill', showPanelBackground:'Show background', showGoalImage:'Show image', imageMode:'Image mode', imageFit:'Image fit', imageReveal:'Grayscale reveal', imageOverlay:'Overlay', imageContain:'Contain', imageCover:'Cover', imageDrop:'Drop PNG/JPG/WebP here or click', clearImage:'Clear image' });
+    Object.assign(i18n.en, { goalPresets:'Goal presets', goalText:'Goal text', goalBar:'Goal bar', goalImage:'Goal image', lastDonation:'Last donation', connectedServices:'Connected services', textPlacement:'Text placement', insideBar:'Inside bar', aboveBar:'Above bar', belowBar:'Below bar', textAlign:'Text align', left:'Left', center:'Center', right:'Right', textX:'Text X', textY:'Text Y', panelWidth:'Panel width', barWidth:'Bar width, %', barHeight:'Bar height', barAlign:'Bar align', boxRadius:'Box radius', barRadius:'Bar radius', fill:'Fill', emptyBar:'Empty bar', showServices:'Show connected services', servicesTitle:'Services title', servicesAlign:'Services align', servicesSize:'Services size', title1:'Title 1', title2:'Title 2', containerOpacity:'Background opacity', barOpacity:'Bar opacity', showLastDonor:'Show last donor', showLastAmount:'Show last amount', showLastPlatform:'Show last platform', showGoalText:'Show goal text', showGoalValue:'Show amount text', showGoalMeta:'Show progress number', showGoalBar:'Show bar', showGoalProgress:'Show progress fill', showPanelBackground:'Show background', showGoalImage:'Show image', imageMode:'Image mode', imageFit:'Image fit', imageReveal:'Grayscale reveal', imageOverlay:'Overlay', imageContain:'Contain', imageCover:'Cover', imageDrop:'Drop PNG/JPG/WebP here or click', clearImage:'Clear image', goalDeadlineTimer:'Goal deadline timer', showGoalDeadline:'Show goal deadline timer', goalDeadlineTitle:'Timer title', goalDeadlineEndsAt:'End date and time', goalDeadlineExpiredText:'Expired text', goalDeadlineShowDate:'Show end date', goalDeadlineFont:'Goal timer font', goalDeadlineSize:'Goal timer size', goalDeadlineAlign:'Goal timer align', goalDeadlineX:'Goal timer X', goalDeadlineY:'Goal timer Y', goalDeadlineWidth:'Goal timer width', goalDeadlineHeight:'Goal timer height', goalDeadlineRotation:'Goal timer rotation', goalDeadlineDays:'Days', goalDeadlineHours:'Hours', goalDeadlineMinutes:'Minutes', goalDeadlineSeconds:'Seconds', goalDeadlineSetDuration:'Set from now', goalDeadlineExtendDuration:'Extend', goalDeadlineStop:'Turn off timer', goalDeadlineUpdated:'Goal deadline timer updated', goalDeadlineStopped:'Goal deadline timer disabled', goalDeadlineEmptyDuration:'Enter days, hours, minutes or seconds first', goalDeadlineNote:'This timer is tied to a real end date and hides automatically when the fundraising period ends. It is not the donation timer where money adds minutes.' });
+    Object.assign(i18n.ru, { goalDeadlineTimer:'Таймер сбора', showGoalDeadline:'Показать таймер сбора', goalDeadlineTitle:'Подпись таймера', goalDeadlineEndsAt:'Дата и время окончания', goalDeadlineExpiredText:'Текст после окончания', goalDeadlineShowDate:'Показать дату окончания', goalDeadlineFont:'Шрифт таймера сбора', goalDeadlineSize:'Размер таймера сбора', goalDeadlineAlign:'Выравнивание таймера', goalDeadlineX:'Таймер X', goalDeadlineY:'Таймер Y', goalDeadlineWidth:'Ширина таймера', goalDeadlineHeight:'Высота таймера', goalDeadlineRotation:'Поворот таймера', goalDeadlineDays:'Дни', goalDeadlineHours:'Часы', goalDeadlineMinutes:'Минуты', goalDeadlineSeconds:'Секунды', goalDeadlineSetDuration:'Поставить от сейчас', goalDeadlineExtendDuration:'Продлить', goalDeadlineStop:'Отключить таймер', goalDeadlineUpdated:'Таймер сбора обновлён', goalDeadlineStopped:'Таймер сбора отключён', goalDeadlineEmptyDuration:'Сначала введи дни, часы, минуты или секунды', goalDeadlineNote:'Этот таймер привязан к реальной дате окончания сбора и сам скрывается, когда сбор закончился. Это не донатный таймер, где сумма добавляет минуты.' });
+    Object.assign(i18n.uk, { goalDeadlineTimer:'Таймер збору', showGoalDeadline:'Показати таймер збору', goalDeadlineTitle:'Підпис таймера', goalDeadlineEndsAt:'Дата й час завершення', goalDeadlineExpiredText:'Текст після завершення', goalDeadlineShowDate:'Показати дату завершення', goalDeadlineFont:'Шрифт таймера збору', goalDeadlineSize:'Розмір таймера збору', goalDeadlineAlign:'Вирівнювання таймера', goalDeadlineX:'Таймер X', goalDeadlineY:'Таймер Y', goalDeadlineWidth:'Ширина таймера', goalDeadlineHeight:'Висота таймера', goalDeadlineRotation:'Поворот таймера', goalDeadlineDays:'Дні', goalDeadlineHours:'Години', goalDeadlineMinutes:'Хвилини', goalDeadlineSeconds:'Секунди', goalDeadlineSetDuration:'Поставити від зараз', goalDeadlineExtendDuration:'Продовжити', goalDeadlineStop:'Вимкнути таймер', goalDeadlineUpdated:'Таймер збору оновлено', goalDeadlineStopped:'Таймер збору вимкнено', goalDeadlineEmptyDuration:'Спочатку введи дні, години, хвилини або секунди', goalDeadlineNote:'Цей таймер прив’язаний до реальної дати завершення збору і сам ховається, коли збір завершився. Це не донатний таймер, де сума додає хвилини.' });
     Object.assign(i18n.ru, { goalPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u0446\u0435\u043b\u0438', goalText:'\u0422\u0435\u043a\u0441\u0442 \u0446\u0435\u043b\u0438', goalBar:'\u041f\u043e\u043b\u043e\u0441\u0430 \u0446\u0435\u043b\u0438', connectedServices:'\u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u044b\u0435 \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438', textPlacement:'\u0413\u0434\u0435 \u0442\u0435\u043a\u0441\u0442', insideBar:'\u0412\u043d\u0443\u0442\u0440\u0438 \u043f\u043e\u043b\u043e\u0441\u044b', aboveBar:'\u041d\u0430\u0434 \u043f\u043e\u043b\u043e\u0441\u043e\u0439', belowBar:'\u041f\u043e\u0434 \u043f\u043e\u043b\u043e\u0441\u043e\u0439', textAlign:'\u0412\u044b\u0440\u0430\u0432\u043d\u0438\u0432\u0430\u043d\u0438\u0435 \u0442\u0435\u043a\u0441\u0442\u0430', left:'\u0421\u043b\u0435\u0432\u0430', center:'\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443', right:'\u0421\u043f\u0440\u0430\u0432\u0430', textX:'\u0422\u0435\u043a\u0441\u0442 X', textY:'\u0422\u0435\u043a\u0441\u0442 Y', panelWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0432\u0438\u0434\u0436\u0435\u0442\u0430', barWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u043f\u043e\u043b\u043e\u0441\u044b, %', barHeight:'\u0412\u044b\u0441\u043e\u0442\u0430 \u043f\u043e\u043b\u043e\u0441\u044b', barAlign:'\u041f\u043e\u0437\u0438\u0446\u0438\u044f \u043f\u043e\u043b\u043e\u0441\u044b', boxRadius:'\u0420\u0430\u0434\u0438\u0443\u0441 \u0431\u043e\u043a\u0441\u0430', barRadius:'\u0420\u0430\u0434\u0438\u0443\u0441 \u043f\u043e\u043b\u043e\u0441\u044b', fill:'\u0417\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435', emptyBar:'\u041f\u0443\u0441\u0442\u0430\u044f \u043f\u043e\u043b\u043e\u0441\u0430', showServices:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438', servicesTitle:'\u041f\u043e\u0434\u043f\u0438\u0441\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043e\u043a', servicesAlign:'\u0412\u044b\u0440\u0430\u0432\u043d\u0438\u0432\u0430\u043d\u0438\u0435', servicesSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0441\u0442\u0440\u043e\u043a\u0438', title1:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a 1', title2:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a 2', containerOpacity:'\u041f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430', barOpacity:'\u041f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c \u043f\u043e\u043b\u043e\u0441\u044b', showLastDonor:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0433\u043e \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', showLastAmount:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0443\u043c\u043c\u0443', showLastPlatform:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0443' });
     Object.assign(i18n.uk, { goalPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u0446\u0456\u043b\u0456', goalText:'\u0422\u0435\u043a\u0441\u0442 \u0446\u0456\u043b\u0456', goalBar:'\u0421\u043c\u0443\u0433\u0430 \u0446\u0456\u043b\u0456', connectedServices:'\u041f\u0456\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0456 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438', textPlacement:'\u0414\u0435 \u0442\u0435\u043a\u0441\u0442', insideBar:'\u0423\u0441\u0435\u0440\u0435\u0434\u0438\u043d\u0456 \u0441\u043c\u0443\u0433\u0438', aboveBar:'\u041d\u0430\u0434 \u0441\u043c\u0443\u0433\u043e\u044e', belowBar:'\u041f\u0456\u0434 \u0441\u043c\u0443\u0433\u043e\u044e', textAlign:'\u0412\u0438\u0440\u0456\u0432\u043d\u044e\u0432\u0430\u043d\u043d\u044f \u0442\u0435\u043a\u0441\u0442\u0443', left:'\u041b\u0456\u0432\u043e\u0440\u0443\u0447', center:'\u041f\u043e \u0446\u0435\u043d\u0442\u0440\u0443', right:'\u041f\u0440\u0430\u0432\u043e\u0440\u0443\u0447', textX:'\u0422\u0435\u043a\u0441\u0442 X', textY:'\u0422\u0435\u043a\u0441\u0442 Y', panelWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0432\u0456\u0434\u0436\u0435\u0442\u0430', barWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0441\u043c\u0443\u0433\u0438, %', barHeight:'\u0412\u0438\u0441\u043e\u0442\u0430 \u0441\u043c\u0443\u0433\u0438', barAlign:'\u041f\u043e\u0437\u0438\u0446\u0456\u044f \u0441\u043c\u0443\u0433\u0438', boxRadius:'\u0420\u0430\u0434\u0456\u0443\u0441 \u0431\u043e\u043a\u0441\u0430', barRadius:'\u0420\u0430\u0434\u0456\u0443\u0441 \u0441\u043c\u0443\u0433\u0438', fill:'\u0417\u0430\u043f\u043e\u0432\u043d\u0435\u043d\u043d\u044f', emptyBar:'\u041f\u043e\u0440\u043e\u0436\u043d\u044f \u0441\u043c\u0443\u0433\u0430', showServices:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438', servicesTitle:'\u041f\u0456\u0434\u043f\u0438\u0441 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c', servicesAlign:'\u0412\u0438\u0440\u0456\u0432\u043d\u044e\u0432\u0430\u043d\u043d\u044f', servicesSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0440\u044f\u0434\u043a\u0430', title1:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a 1', title2:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a 2', containerOpacity:'\u041f\u0440\u043e\u0437\u043e\u0440\u0456\u0441\u0442\u044c \u043a\u043e\u043d\u0442\u0435\u0439\u043d\u0435\u0440\u0430', barOpacity:'\u041f\u0440\u043e\u0437\u043e\u0440\u0456\u0441\u0442\u044c \u0441\u043c\u0443\u0433\u0438', showLastDonor:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043e\u0441\u0442\u0430\u043d\u043d\u044c\u043e\u0433\u043e \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', showLastAmount:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0441\u0443\u043c\u0443', showLastPlatform:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0443' });
     Object.assign(i18n.ru, { goalImage:'\u0418\u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u0435 \u0446\u0435\u043b\u0438', lastDonation:'\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0434\u043e\u043d\u0430\u0442', showGoalText:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0442\u0435\u043a\u0441\u0442 \u0446\u0435\u043b\u0438', showGoalValue:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0443\u043c\u043c\u0443 \u0446\u0435\u043b\u0438', showGoalMeta:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0446\u0438\u0444\u0440\u0443 \u043f\u0440\u043e\u0433\u0440\u0435\u0441\u0441\u0430', showGoalBar:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043e\u043b\u043e\u0441\u0443', showGoalProgress:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435', showPanelBackground:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0444\u043e\u043d', containerOpacity:'\u041f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u044c \u0444\u043e\u043d\u0430', showGoalImage:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443', imageMode:'\u0420\u0435\u0436\u0438\u043c \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438', imageFit:'\u0420\u0430\u0437\u043c\u0435\u0440 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438', imageReveal:'\u041f\u0440\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u0435 \u0438\u0437 \u0447/\u0431', imageOverlay:'\u041f\u043e\u0432\u0435\u0440\u0445 \u043f\u043e\u043b\u043e\u0441\u044b', imageContain:'\u0412\u043f\u0438\u0441\u0430\u0442\u044c', imageCover:'\u0417\u0430\u043f\u043e\u043b\u043d\u0438\u0442\u044c', imageDrop:'\u041f\u0435\u0440\u0435\u0442\u0430\u0449\u0438 PNG/JPG/WebP \u0441\u044e\u0434\u0430 \u0438\u043b\u0438 \u043d\u0430\u0436\u043c\u0438', clearImage:'\u0423\u0431\u0440\u0430\u0442\u044c \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443' });
@@ -9575,39 +10748,39 @@ public class DonConnectWidgetServer
     Object.assign(i18n.en, { fonts:'Fonts', defaultFont:'Default', baseFont:'Base font', donorFont:'Donor font', amountFont:'Amount font', messageFont:'Message font', title1Font:'Title 1 font', title2Font:'Title 2 font', goalAmountFont:'Goal amount font', providersFont:'Providers font', lastDonationFont:'Last donation font', timerFont:'Timer font', titleFont:'Title font', detailsFont:'Details font', visualType:'Visual type', visualBar:'Regular bar', visualImageReveal:'Image: grayscale reveal', visualImageSilhouette:'Image: silhouette reveal', fillDirection:'Fill direction', horizontal:'Horizontal', vertical:'Vertical', barLength:'Bar length', barImage:'Bar image', decorImage:'Decor image', showDecorImage:'Show decor image', imageX:'Image X', imageY:'Image Y', imageWidth:'Image width', imageHeight:'Image height' });
     Object.assign(i18n.ru, { fonts:'\u0428\u0440\u0438\u0444\u0442\u044b', defaultFont:'\u041f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e', baseFont:'\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0439 \u0448\u0440\u0438\u0444\u0442', donorFont:'\u0428\u0440\u0438\u0444\u0442 \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', amountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u043c\u044b', messageFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f', title1Font:'\u0428\u0440\u0438\u0444\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430 1', title2Font:'\u0428\u0440\u0438\u0444\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430 2', goalAmountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u043c\u044b \u0446\u0435\u043b\u0438', providersFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u043b\u043e\u0449\u0430\u0434\u043e\u043a', lastDonationFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0433\u043e \u0434\u043e\u043d\u0430\u0442\u0430', timerFont:'\u0428\u0440\u0438\u0444\u0442 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', titleFont:'\u0428\u0440\u0438\u0444\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430', detailsFont:'\u0428\u0440\u0438\u0444\u0442 \u0434\u0435\u0442\u0430\u043b\u0435\u0439', visualType:'\u0422\u0438\u043f \u0432\u0438\u0437\u0443\u0430\u043b\u0430', visualBar:'\u041e\u0431\u044b\u0447\u043d\u0430\u044f \u043f\u043e\u043b\u043e\u0441\u0430', visualImageReveal:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u043f\u0440\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u0435 \u0438\u0437 \u0447/\u0431', visualImageSilhouette:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u0441\u0438\u043b\u0443\u044d\u0442', fillDirection:'\u041d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f', horizontal:'\u0413\u043e\u0440\u0438\u0437\u043e\u043d\u0442\u0430\u043b\u044c\u043d\u043e', vertical:'\u0412\u0435\u0440\u0442\u0438\u043a\u0430\u043b\u044c\u043d\u043e', barLength:'\u0414\u043b\u0438\u043d\u0430 \u043f\u043e\u043b\u043e\u0441\u044b', barImage:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 \u0446\u0435\u043b\u0438', decorImage:'\u0414\u0435\u043a\u043e\u0440\u0430\u0442\u0438\u0432\u043d\u0430\u044f \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0430', showDecorImage:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0434\u0435\u043a\u043e\u0440\u0430\u0442\u0438\u0432\u043d\u0443\u044e \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443', imageX:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 X', imageY:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 Y', imageWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438', imageHeight:'\u0412\u044b\u0441\u043e\u0442\u0430 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438' });
     Object.assign(i18n.uk, { fonts:'\u0428\u0440\u0438\u0444\u0442\u0438', defaultFont:'\u0417\u0430 \u0437\u0430\u043c\u043e\u0432\u0447\u0443\u0432\u0430\u043d\u043d\u044f\u043c', baseFont:'\u041e\u0441\u043d\u043e\u0432\u043d\u0438\u0439 \u0448\u0440\u0438\u0444\u0442', donorFont:'\u0428\u0440\u0438\u0444\u0442 \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', amountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u0438', messageFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f', title1Font:'\u0428\u0440\u0438\u0444\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430 1', title2Font:'\u0428\u0440\u0438\u0444\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430 2', goalAmountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u0438 \u0446\u0456\u043b\u0456', providersFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c', lastDonationFont:'\u0428\u0440\u0438\u0444\u0442 \u043e\u0441\u0442\u0430\u043d\u043d\u044c\u043e\u0433\u043e \u0434\u043e\u043d\u0430\u0442\u0443', timerFont:'\u0428\u0440\u0438\u0444\u0442 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', titleFont:'\u0428\u0440\u0438\u0444\u0442 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430', detailsFont:'\u0428\u0440\u0438\u0444\u0442 \u0434\u0435\u0442\u0430\u043b\u0435\u0439', visualType:'\u0422\u0438\u043f \u0432\u0456\u0437\u0443\u0430\u043b\u0443', visualBar:'\u0417\u0432\u0438\u0447\u0430\u0439\u043d\u0430 \u0441\u043c\u0443\u0433\u0430', visualImageReveal:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u043f\u0440\u043e\u044f\u0432\u043b\u0435\u043d\u043d\u044f \u0437 \u0447/\u0431', visualImageSilhouette:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u0441\u0438\u043b\u0443\u0435\u0442', fillDirection:'\u041d\u0430\u043f\u0440\u044f\u043c \u0437\u0430\u043f\u043e\u0432\u043d\u0435\u043d\u043d\u044f', horizontal:'\u0413\u043e\u0440\u0438\u0437\u043e\u043d\u0442\u0430\u043b\u044c\u043d\u043e', vertical:'\u0412\u0435\u0440\u0442\u0438\u043a\u0430\u043b\u044c\u043d\u043e', barLength:'\u0414\u043e\u0432\u0436\u0438\u043d\u0430 \u0441\u043c\u0443\u0433\u0438', barImage:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 \u0446\u0456\u043b\u0456', decorImage:'\u0414\u0435\u043a\u043e\u0440\u0430\u0442\u0438\u0432\u043d\u0430 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0430', showDecorImage:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0434\u0435\u043a\u043e\u0440\u0430\u0442\u0438\u0432\u043d\u0443 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443', imageX:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 X', imageY:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 Y', imageWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438', imageHeight:'\u0412\u0438\u0441\u043e\u0442\u0430 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0438' });
-    Object.assign(i18n.en, { visualImageTransparent:'Image: transparent reveal', visualImageInverse:'Image: disappear on progress', timerWidth:'Timer width', timerX:'Timer X', timerY:'Timer Y', timerAlign:'Timer align' });
-    Object.assign(i18n.ru, { visualImageTransparent:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u043f\u0440\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u0435 \u0438\u0437 \u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u0438', visualImageInverse:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u0438\u0441\u0447\u0435\u0437\u0430\u043d\u0438\u0435 \u043f\u043e \u043c\u0435\u0440\u0435 \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f', timerWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerX:'\u0422\u0430\u0439\u043c\u0435\u0440 X', timerY:'\u0422\u0430\u0439\u043c\u0435\u0440 Y', timerAlign:'\u0412\u044b\u0440\u0430\u0432\u043d\u0438\u0432\u0430\u043d\u0438\u0435 \u0442\u0430\u0439\u043c\u0435\u0440\u0430' });
-    Object.assign(i18n.uk, { visualImageTransparent:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u043f\u0440\u043e\u044f\u0432\u043b\u0435\u043d\u043d\u044f \u0437 \u043f\u0440\u043e\u0437\u043e\u0440\u043e\u0441\u0442\u0456', visualImageInverse:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u0437\u043d\u0438\u043a\u043d\u0435\u043d\u043d\u044f \u0437\u0430 \u043c\u0456\u0440\u043e\u044e \u0437\u0430\u043f\u043e\u0432\u043d\u0435\u043d\u043d\u044f', timerWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerX:'\u0422\u0430\u0439\u043c\u0435\u0440 X', timerY:'\u0422\u0430\u0439\u043c\u0435\u0440 Y', timerAlign:'\u0412\u0438\u0440\u0456\u0432\u043d\u044e\u0432\u0430\u043d\u043d\u044f \u0442\u0430\u0439\u043c\u0435\u0440\u0430' });
-    Object.assign(i18n.en, { leaderboard:'Leaderboard', leaderboardEditor:'Leaderboard editor', leaderboardLook:'Leaderboard look', enableLeaderboard:'Enable leaderboard', showTitle:'Show title', mode:'Mode', overallTop:'Overall top', platformSlides:'Platform slides', recentDonations:'Recent donations', rows:'Rows', slideDuration:'Slide duration, ms', showRanks:'Show ranks', showAmounts:'Show amounts', showPlatforms:'Show platforms', amountFont:'Amount font', rowGap:'Row gap', clearLeaderboard:'Clear leaderboard data', leaderboardCleared:'Leaderboard data cleared' });
-    Object.assign(i18n.ru, { leaderboard:'\u041b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434', leaderboardEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', leaderboardLook:'\u0412\u0438\u0434 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', enableLeaderboard:'\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434', showTitle:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', mode:'\u0420\u0435\u0436\u0438\u043c', overallTop:'\u041e\u0431\u0449\u0438\u0439 \u0442\u043e\u043f', platformSlides:'\u0421\u043b\u0430\u0439\u0434\u044b \u043f\u043e \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0430\u043c', recentDonations:'\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0434\u043e\u043d\u0430\u0442\u044b', rows:'\u0421\u0442\u0440\u043e\u043a\u0438', slideDuration:'\u0414\u043b\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u0441\u043b\u0430\u0439\u0434\u0430, \u043c\u0441', showRanks:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043c\u0435\u0441\u0442\u0430', showAmounts:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0443\u043c\u043c\u044b', showPlatforms:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438', amountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u043c\u044b', rowGap:'\u041e\u0442\u0441\u0442\u0443\u043f \u043c\u0435\u0436\u0434\u0443 \u0441\u0442\u0440\u043e\u043a\u0430\u043c\u0438', clearLeaderboard:'\u041e\u0447\u0438\u0441\u0442\u0438\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', leaderboardCleared:'\u0414\u0430\u043d\u043d\u044b\u0435 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430 \u043e\u0447\u0438\u0449\u0435\u043d\u044b' });
-    Object.assign(i18n.uk, { leaderboard:'\u041b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434', leaderboardEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', leaderboardLook:'\u0412\u0438\u0433\u043b\u044f\u0434 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', enableLeaderboard:'\u0423\u0432\u0456\u043c\u043a\u043d\u0443\u0442\u0438 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434', showTitle:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', mode:'\u0420\u0435\u0436\u0438\u043c', overallTop:'\u0417\u0430\u0433\u0430\u043b\u044c\u043d\u0438\u0439 \u0442\u043e\u043f', platformSlides:'\u0421\u043b\u0430\u0439\u0434\u0438 \u0437\u0430 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0430\u043c\u0438', recentDonations:'\u041e\u0441\u0442\u0430\u043d\u043d\u0456 \u0434\u043e\u043d\u0430\u0442\u0438', rows:'\u0420\u044f\u0434\u043a\u0438', slideDuration:'\u0422\u0440\u0438\u0432\u0430\u043b\u0456\u0441\u0442\u044c \u0441\u043b\u0430\u0439\u0434\u0443, \u043c\u0441', showRanks:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043c\u0456\u0441\u0446\u044f', showAmounts:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0441\u0443\u043c\u0438', showPlatforms:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438', amountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u0438', rowGap:'\u0412\u0456\u0434\u0441\u0442\u0443\u043f \u043c\u0456\u0436 \u0440\u044f\u0434\u043a\u0430\u043c\u0438', clearLeaderboard:'\u041e\u0447\u0438\u0441\u0442\u0438\u0442\u0438 \u0434\u0430\u043d\u0456 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', leaderboardCleared:'\u0414\u0430\u043d\u0456 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443 \u043e\u0447\u0438\u0449\u0435\u043d\u043e' });
+    Object.assign(i18n.en, { visualImageTransparent:'Image: transparent reveal', visualImageInverse:'Image: disappear on progress', timerWidth:'Timer width', timerX:'Timer X', timerY:'Timer Y', timerAlign:'Timer align', timerValueFont:'Time font', timerMetaFont:'Details font', timerConversionFont:'Conversion font', subtitleFont:'Subtitle font', sectionTitleFont:'Section title font', sectionLabels:'Section labels', sectionFonts:'Section fonts', originalSection:'Section', sectionDisplayName:'Display name' });
+    Object.assign(i18n.ru, { visualImageTransparent:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u043f\u0440\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u0435 \u0438\u0437 \u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u043e\u0441\u0442\u0438', visualImageInverse:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u0438\u0441\u0447\u0435\u0437\u0430\u043d\u0438\u0435 \u043f\u043e \u043c\u0435\u0440\u0435 \u0437\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f', timerWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerX:'\u0422\u0430\u0439\u043c\u0435\u0440 X', timerY:'\u0422\u0430\u0439\u043c\u0435\u0440 Y', timerAlign:'\u0412\u044b\u0440\u0430\u0432\u043d\u0438\u0432\u0430\u043d\u0438\u0435 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerValueFont:'\u0428\u0440\u0438\u0444\u0442 \u0432\u0440\u0435\u043c\u0435\u043d\u0438', timerMetaFont:'\u0428\u0440\u0438\u0444\u0442 \u0434\u0435\u0442\u0430\u043b\u0435\u0439', timerConversionFont:'\u0428\u0440\u0438\u0444\u0442 \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0438\u0438', subtitleFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u043e\u0434\u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430', sectionTitleFont:'\u0428\u0440\u0438\u0444\u0442 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0439 \u0441\u0435\u043a\u0446\u0438\u0439', sectionLabels:'\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u044f \u0441\u0435\u043a\u0446\u0438\u0439', sectionFonts:'\u0428\u0440\u0438\u0444\u0442\u044b \u0441\u0435\u043a\u0446\u0438\u0439', originalSection:'\u0421\u0435\u043a\u0446\u0438\u044f', sectionDisplayName:'\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u0432 \u0442\u0438\u0442\u0440\u0430\u0445' });
+    Object.assign(i18n.uk, { visualImageTransparent:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u043f\u0440\u043e\u044f\u0432\u043b\u0435\u043d\u043d\u044f \u0437 \u043f\u0440\u043e\u0437\u043e\u0440\u043e\u0441\u0442\u0456', visualImageInverse:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430: \u0437\u043d\u0438\u043a\u043d\u0435\u043d\u043d\u044f \u0437\u0430 \u043c\u0456\u0440\u043e\u044e \u0437\u0430\u043f\u043e\u0432\u043d\u0435\u043d\u043d\u044f', timerWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerX:'\u0422\u0430\u0439\u043c\u0435\u0440 X', timerY:'\u0422\u0430\u0439\u043c\u0435\u0440 Y', timerAlign:'\u0412\u0438\u0440\u0456\u0432\u043d\u044e\u0432\u0430\u043d\u043d\u044f \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerValueFont:'\u0428\u0440\u0438\u0444\u0442 \u0447\u0430\u0441\u0443', timerMetaFont:'\u0428\u0440\u0438\u0444\u0442 \u0434\u0435\u0442\u0430\u043b\u0435\u0439', timerConversionFont:'\u0428\u0440\u0438\u0444\u0442 \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0456\u0457', subtitleFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u0456\u0434\u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0430', sectionTitleFont:'\u0428\u0440\u0438\u0444\u0442 \u043d\u0430\u0437\u0432 \u0441\u0435\u043a\u0446\u0456\u0439', sectionLabels:'\u041d\u0430\u0437\u0432\u0438 \u0441\u0435\u043a\u0446\u0456\u0439', sectionFonts:'\u0428\u0440\u0438\u0444\u0442\u0438 \u0441\u0435\u043a\u0446\u0456\u0439', originalSection:'\u0421\u0435\u043a\u0446\u0456\u044f', sectionDisplayName:'\u041d\u0430\u0437\u0432\u0430 \u0432 \u0442\u0438\u0442\u0440\u0430\u0445' });
+    Object.assign(i18n.en, { leaderboard:'Leaderboard', leaderboardEditor:'Leaderboard editor', leaderboardLook:'Leaderboard look', enableLeaderboard:'Enable leaderboard', showTitle:'Show title', mode:'Mode', overallTop:'Overall top', monthTop:'Top this month', weekTop:'Top this week', streamTop:'Top this stream', platformSlides:'Platform slides', recentDonations:'Recent donations', rows:'Rows', slideDuration:'Slide duration, ms', showRanks:'Show ranks', showAmounts:'Show amounts', showPlatforms:'Show platforms', resetOnStart:'Clear once per day on start', amountFont:'Amount font', rowGap:'Row gap', clearLeaderboard:'Clear leaderboard data', leaderboardCleared:'Leaderboard data cleared', slideAnimation:'Slide animation' });
+    Object.assign(i18n.ru, { leaderboard:'\u041b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434', leaderboardEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', leaderboardLook:'\u0412\u0438\u0434 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', enableLeaderboard:'\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434', showTitle:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', mode:'\u0420\u0435\u0436\u0438\u043c', overallTop:'\u041e\u0431\u0449\u0438\u0439 \u0442\u043e\u043f', platformSlides:'\u0421\u043b\u0430\u0439\u0434\u044b \u043f\u043e \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0430\u043c', recentDonations:'\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0434\u043e\u043d\u0430\u0442\u044b', rows:'\u0421\u0442\u0440\u043e\u043a\u0438', slideDuration:'\u0414\u043b\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c \u0441\u043b\u0430\u0439\u0434\u0430, \u043c\u0441', showRanks:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043c\u0435\u0441\u0442\u0430', showAmounts:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0443\u043c\u043c\u044b', showPlatforms:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438', resetOnStart:'\u041e\u0447\u0438\u0449\u0430\u0442\u044c \u043e\u0434\u0438\u043d \u0440\u0430\u0437 \u0432 \u0434\u0435\u043d\u044c \u043f\u0440\u0438 \u0437\u0430\u043f\u0443\u0441\u043a\u0435', amountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u043c\u044b', rowGap:'\u041e\u0442\u0441\u0442\u0443\u043f \u043c\u0435\u0436\u0434\u0443 \u0441\u0442\u0440\u043e\u043a\u0430\u043c\u0438', clearLeaderboard:'\u041e\u0447\u0438\u0441\u0442\u0438\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', leaderboardCleared:'\u0414\u0430\u043d\u043d\u044b\u0435 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430 \u043e\u0447\u0438\u0449\u0435\u043d\u044b' });
+    Object.assign(i18n.uk, { leaderboard:'\u041b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434', leaderboardEditor:'\u0420\u0435\u0434\u0430\u043a\u0442\u043e\u0440 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', leaderboardLook:'\u0412\u0438\u0433\u043b\u044f\u0434 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', enableLeaderboard:'\u0423\u0432\u0456\u043c\u043a\u043d\u0443\u0442\u0438 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434', showTitle:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', mode:'\u0420\u0435\u0436\u0438\u043c', overallTop:'\u0417\u0430\u0433\u0430\u043b\u044c\u043d\u0438\u0439 \u0442\u043e\u043f', platformSlides:'\u0421\u043b\u0430\u0439\u0434\u0438 \u0437\u0430 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0430\u043c\u0438', recentDonations:'\u041e\u0441\u0442\u0430\u043d\u043d\u0456 \u0434\u043e\u043d\u0430\u0442\u0438', rows:'\u0420\u044f\u0434\u043a\u0438', slideDuration:'\u0422\u0440\u0438\u0432\u0430\u043b\u0456\u0441\u0442\u044c \u0441\u043b\u0430\u0439\u0434\u0443, \u043c\u0441', showRanks:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043c\u0456\u0441\u0446\u044f', showAmounts:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0441\u0443\u043c\u0438', showPlatforms:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438', resetOnStart:'\u041e\u0447\u0438\u0449\u0430\u0442\u0438 \u043e\u0434\u0438\u043d \u0440\u0430\u0437 \u043d\u0430 \u0434\u0435\u043d\u044c \u043f\u0440\u0438 \u0437\u0430\u043f\u0443\u0441\u043a\u0443', amountFont:'\u0428\u0440\u0438\u0444\u0442 \u0441\u0443\u043c\u0438', rowGap:'\u0412\u0456\u0434\u0441\u0442\u0443\u043f \u043c\u0456\u0436 \u0440\u044f\u0434\u043a\u0430\u043c\u0438', clearLeaderboard:'\u041e\u0447\u0438\u0441\u0442\u0438\u0442\u0438 \u0434\u0430\u043d\u0456 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', leaderboardCleared:'\u0414\u0430\u043d\u0456 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443 \u043e\u0447\u0438\u0449\u0435\u043d\u043e' });
     Object.assign(i18n.en, { creditsSectionTitle:'Donation section title', showMessages:'Show messages' });
     Object.assign(i18n.ru, { creditsSectionTitle:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u0441\u0435\u043a\u0446\u0438\u0438 \u0434\u043e\u043d\u0430\u0442\u043e\u0432', showMessages:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f' });
     Object.assign(i18n.uk, { creditsSectionTitle:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u0441\u0435\u043a\u0446\u0456\u0457 \u0434\u043e\u043d\u0430\u0442\u0456\u0432', showMessages:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f' });
-    Object.assign(i18n.en, { alertMedia:'Alert media library', alertRules:'Amount rules', alertAnimations:'Alert animations', platform:'Platform', platformFont:'Platform font', showPlatform:'Show platform', defaultVisual:'Default visual', alertSound:'Alert sound', textSound:'Text animation sound', visualFit:'Visual fit', visualWidth:'Visual width', visualHeight:'Visual height', visualX:'Visual X', visualY:'Visual Y', muteVideo:'Mute video audio', showBackground:'Show background', showAccentBar:'Show accent bar', visibleDuration:'Visible duration, ms', entryAnimation:'Entry animation', exitAnimation:'Exit animation', donorTextAnimation:'Donor text animation', alertVolume:'Alert volume', textSoundVolume:'Text sound volume', addRule:'Add amount rule', deleteFile:'Delete', uploaded:'Media library updated', deleted:'Media file deleted' });
+    Object.assign(i18n.en, { alertMedia:'Alert media library', alertRules:'Amount rules', alertAnimations:'Alert animations', platform:'Platform', platformFont:'Platform font', showPlatform:'Show platform', defaultVisual:'Default visual', alertSound:'Alert sound', textSound:'Text animation sound', visualFit:'Visual fit', visualWidth:'Visual width', visualHeight:'Visual height', visualX:'Visual X', visualY:'Visual Y', muteVideo:'Mute video audio', showBackground:'Show background', showAccentBar:'Show accent bar', visibleDuration:'Visible duration, ms', entryAnimation:'Entry animation', exitAnimation:'Exit animation', donorTextAnimation:'Donor text animation', alertVolume:'Alert volume', textSoundVolume:'Text sound volume', entryAnimationSpeed:'Entry speed, ms', exitAnimationSpeed:'Exit speed, ms', addRule:'Add amount rule', deleteFile:'Delete', uploaded:'Media library updated', deleted:'Media file deleted' });
     Object.assign(i18n.ru, { alertMedia:'\u041c\u0435\u0434\u0438\u0430\u0442\u0435\u043a\u0430 \u0430\u043b\u0451\u0440\u0442\u043e\u0432', alertRules:'\u041f\u0440\u0430\u0432\u0438\u043b\u0430 \u043f\u043e \u0441\u0443\u043c\u043c\u0430\u043c', alertAnimations:'\u0410\u043d\u0438\u043c\u0430\u0446\u0438\u0438 \u0430\u043b\u0451\u0440\u0442\u0430', platform:'\u041f\u043b\u043e\u0449\u0430\u0434\u043a\u0430', platformFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438', showPlatform:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0443', defaultVisual:'\u0412\u0438\u0437\u0443\u0430\u043b \u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e', alertSound:'\u0417\u0432\u0443\u043a \u0430\u043b\u0451\u0440\u0442\u0430', textSound:'\u0417\u0432\u0443\u043a \u0430\u043d\u0438\u043c\u0430\u0446\u0438\u0438 \u0442\u0435\u043a\u0441\u0442\u0430', visualFit:'\u0412\u043f\u0438\u0441\u044b\u0432\u0430\u043d\u0438\u0435 \u0432\u0438\u0437\u0443\u0430\u043b\u0430', visualWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0432\u0438\u0437\u0443\u0430\u043b\u0430', visualHeight:'\u0412\u044b\u0441\u043e\u0442\u0430 \u0432\u0438\u0437\u0443\u0430\u043b\u0430', visualX:'\u0412\u0438\u0437\u0443\u0430\u043b X', visualY:'\u0412\u0438\u0437\u0443\u0430\u043b Y', muteVideo:'\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0437\u0432\u0443\u043a \u0432\u0438\u0434\u0435\u043e', showBackground:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0444\u043e\u043d', showAccentBar:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0430\u043a\u0446\u0435\u043d\u0442\u043d\u0443\u044e \u043f\u043e\u043b\u043e\u0441\u0443', visibleDuration:'\u0412\u0440\u0435\u043c\u044f \u043f\u043e\u043a\u0430\u0437\u0430, \u043c\u0441', entryAnimation:'\u0410\u043d\u0438\u043c\u0430\u0446\u0438\u044f \u043f\u043e\u044f\u0432\u043b\u0435\u043d\u0438\u044f', exitAnimation:'\u0410\u043d\u0438\u043c\u0430\u0446\u0438\u044f \u0438\u0441\u0447\u0435\u0437\u043d\u043e\u0432\u0435\u043d\u0438\u044f', donorTextAnimation:'\u0410\u043d\u0438\u043c\u0430\u0446\u0438\u044f \u0438\u043c\u0435\u043d\u0438 \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', alertVolume:'\u0413\u0440\u043e\u043c\u043a\u043e\u0441\u0442\u044c \u0430\u043b\u0451\u0440\u0442\u0430', textSoundVolume:'\u0413\u0440\u043e\u043c\u043a\u043e\u0441\u0442\u044c \u0437\u0432\u0443\u043a\u0430 \u0442\u0435\u043a\u0441\u0442\u0430', addRule:'\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u0440\u0430\u0432\u0438\u043b\u043e', deleteFile:'\u0423\u0434\u0430\u043b\u0438\u0442\u044c', uploaded:'\u041c\u0435\u0434\u0438\u0430\u0442\u0435\u043a\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0430', deleted:'\u0424\u0430\u0439\u043b \u0443\u0434\u0430\u043b\u0451\u043d' });
     Object.assign(i18n.uk, { alertMedia:'\u041c\u0435\u0434\u0456\u0430\u0442\u0435\u043a\u0430 \u0430\u043b\u0435\u0440\u0442\u0456\u0432', alertRules:'\u041f\u0440\u0430\u0432\u0438\u043b\u0430 \u0437\u0430 \u0441\u0443\u043c\u0430\u043c\u0438', alertAnimations:'\u0410\u043d\u0456\u043c\u0430\u0446\u0456\u0457 \u0430\u043b\u0435\u0440\u0442\u0443', platform:'\u041f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0430', platformFont:'\u0428\u0440\u0438\u0444\u0442 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438', showPlatform:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0443', defaultVisual:'\u0412\u0456\u0437\u0443\u0430\u043b \u0437\u0430 \u0437\u0430\u043c\u043e\u0432\u0447\u0443\u0432\u0430\u043d\u043d\u044f\u043c', alertSound:'\u0417\u0432\u0443\u043a \u0430\u043b\u0435\u0440\u0442\u0443', textSound:'\u0417\u0432\u0443\u043a \u0430\u043d\u0456\u043c\u0430\u0446\u0456\u0457 \u0442\u0435\u043a\u0441\u0442\u0443', visualFit:'\u0412\u043f\u0438\u0441\u0443\u0432\u0430\u043d\u043d\u044f \u0432\u0456\u0437\u0443\u0430\u043b\u0443', visualWidth:'\u0428\u0438\u0440\u0438\u043d\u0430 \u0432\u0456\u0437\u0443\u0430\u043b\u0443', visualHeight:'\u0412\u0438\u0441\u043e\u0442\u0430 \u0432\u0456\u0437\u0443\u0430\u043b\u0443', visualX:'\u0412\u0456\u0437\u0443\u0430\u043b X', visualY:'\u0412\u0456\u0437\u0443\u0430\u043b Y', muteVideo:'\u0412\u0438\u043c\u043a\u043d\u0443\u0442\u0438 \u0437\u0432\u0443\u043a \u0432\u0456\u0434\u0435\u043e', showBackground:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0444\u043e\u043d', showAccentBar:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0430\u043a\u0446\u0435\u043d\u0442\u043d\u0443 \u0441\u043c\u0443\u0433\u0443', visibleDuration:'\u0427\u0430\u0441 \u043f\u043e\u043a\u0430\u0437\u0443, \u043c\u0441', entryAnimation:'\u0410\u043d\u0456\u043c\u0430\u0446\u0456\u044f \u043f\u043e\u044f\u0432\u0438', exitAnimation:'\u0410\u043d\u0456\u043c\u0430\u0446\u0456\u044f \u0437\u043d\u0438\u043a\u043d\u0435\u043d\u043d\u044f', donorTextAnimation:'\u0410\u043d\u0456\u043c\u0430\u0446\u0456\u044f \u0456\u043c\u0435\u043d\u0456 \u0434\u043e\u043d\u0430\u0442\u0435\u0440\u0430', alertVolume:'\u0413\u0443\u0447\u043d\u0456\u0441\u0442\u044c \u0430\u043b\u0435\u0440\u0442\u0443', textSoundVolume:'\u0413\u0443\u0447\u043d\u0456\u0441\u0442\u044c \u0437\u0432\u0443\u043a\u0443 \u0442\u0435\u043a\u0441\u0442\u0443', addRule:'\u0414\u043e\u0434\u0430\u0442\u0438 \u043f\u0440\u0430\u0432\u0438\u043b\u043e', deleteFile:'\u0412\u0438\u0434\u0430\u043b\u0438\u0442\u0438', uploaded:'\u041c\u0435\u0434\u0456\u0430\u0442\u0435\u043a\u0443 \u043e\u043d\u043e\u0432\u043b\u0435\u043d\u043e', deleted:'\u0424\u0430\u0439\u043b \u0432\u0438\u0434\u0430\u043b\u0435\u043d\u043e' });
     Object.assign(i18n.en, { ruleName:'Name', minAmount:'Minimum', maxAmount:'Maximum, 0 = unlimited', randomVariants:'Random variants', visualVariants:'Visual variants', soundVariants:'Sound variants', removeRule:'Remove rule' });
     Object.assign(i18n.ru, { ruleName:'\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435', minAmount:'\u041c\u0438\u043d\u0438\u043c\u0443\u043c', maxAmount:'\u041c\u0430\u043a\u0441\u0438\u043c\u0443\u043c, 0 = \u0431\u0435\u0437 \u043b\u0438\u043c\u0438\u0442\u0430', randomVariants:'\u0421\u043b\u0443\u0447\u0430\u0439\u043d\u044b\u0435 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u044b', visualVariants:'\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u044b \u043a\u0430\u0440\u0442\u0438\u043d\u043e\u043a', soundVariants:'\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u044b \u0437\u0432\u0443\u043a\u043e\u0432', removeRule:'\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u0440\u0430\u0432\u0438\u043b\u043e' });
     Object.assign(i18n.uk, { ruleName:'\u041d\u0430\u0437\u0432\u0430', minAmount:'\u041c\u0456\u043d\u0456\u043c\u0443\u043c', maxAmount:'\u041c\u0430\u043a\u0441\u0438\u043c\u0443\u043c, 0 = \u0431\u0435\u0437 \u043b\u0456\u043c\u0456\u0442\u0443', randomVariants:'\u0412\u0438\u043f\u0430\u0434\u043a\u043e\u0432\u0456 \u0432\u0430\u0440\u0456\u0430\u043d\u0442\u0438', visualVariants:'\u0412\u0430\u0440\u0456\u0430\u043d\u0442\u0438 \u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u044c', soundVariants:'\u0412\u0430\u0440\u0456\u0430\u043d\u0442\u0438 \u0437\u0432\u0443\u043a\u0456\u0432', removeRule:'\u0412\u0438\u0434\u0430\u043b\u0438\u0442\u0438 \u043f\u0440\u0430\u0432\u0438\u043b\u043e' });
-    Object.assign(i18n.en, { filter:'Blocked', customAlert:'Custom test alert', timerPresets:'Timer presets', creditsPresets:'Credits presets', leaderboardPresets:'Leaderboard presets', leaderboardEntries:'Leaderboard entries', blockedEditor:'Blocked names and words', mediaPlacement:'Visual placement', textAlign:'Text align', donorX:'Donor X', donorY:'Donor Y', amountX:'Amount X', amountY:'Amount Y', messageX:'Message X', messageY:'Message Y', timerMode:'Timer mode', timerConversion:'Show conversion line', timerServices:'Show providers in timer', lastDonationSize:'Last donation size', lastDonationAlign:'Last donation align', rollSeconds:'Base roll duration, seconds', lockCreditsSpeed:'Keep fixed speed for long credits', useNativeCredits:'Use Streamer.bot Credits data', blockedNames:'Blocked nicknames', blockedWords:'Blocked words', replacementName:'Replacement nickname', replacementText:'Replacement text', openMedia:'Open media folder', loadTestCredits:'Load Streamer.bot test credits', sendCustomAlert:'Send custom alert', addLeaderboardEntry:'Add manual row' });
-    Object.assign(i18n.ru, { filter:'\u0417\u0430\u043f\u0440\u0435\u0442', customAlert:'\u041a\u0430\u0441\u0442\u043e\u043c\u043d\u044b\u0439 \u0442\u0435\u0441\u0442 \u0430\u043b\u0451\u0440\u0442\u0430', timerPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u0442\u0430\u0439\u043c\u0435\u0440\u0430', creditsPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u0442\u0438\u0442\u0440\u043e\u0432', leaderboardPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', leaderboardEntries:'\u0421\u0442\u0440\u043e\u043a\u0438 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', blockedEditor:'\u0417\u0430\u043f\u0440\u0435\u0442\u043d\u044b\u0435 \u043d\u0438\u043a\u0438 \u0438 \u0441\u043b\u043e\u0432\u0430', mediaPlacement:'\u0420\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0432\u0438\u0437\u0443\u0430\u043b\u0430', textAlign:'\u0412\u044b\u0440\u0430\u0432\u043d\u0438\u0432\u0430\u043d\u0438\u0435 \u0442\u0435\u043a\u0441\u0442\u0430', donorX:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 X', donorY:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 Y', amountX:'\u0421\u0443\u043c\u043c\u0430 X', amountY:'\u0421\u0443\u043c\u043c\u0430 Y', messageX:'\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 X', messageY:'\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 Y', timerMode:'\u0420\u0435\u0436\u0438\u043c \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerConversion:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0442\u0440\u043e\u043a\u0443 \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0438\u0438', timerServices:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438 \u0432 \u0442\u0430\u0439\u043c\u0435\u0440\u0435', lastDonationSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0441\u0442\u0440\u043e\u043a\u0438 \u0434\u043e\u043d\u0430\u0442\u0430', lastDonationAlign:'\u041f\u043e\u0437\u0438\u0446\u0438\u044f \u0441\u0442\u0440\u043e\u043a\u0438 \u0434\u043e\u043d\u0430\u0442\u0430', rollSeconds:'\u0411\u0430\u0437\u043e\u0432\u0430\u044f \u0434\u043b\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0441\u0442\u044c, \u0441\u0435\u043a\u0443\u043d\u0434\u044b', lockCreditsSpeed:'\u041d\u0435 \u0443\u0441\u043a\u043e\u0440\u044f\u0442\u044c \u0434\u043b\u0438\u043d\u043d\u044b\u0435 \u0442\u0438\u0442\u0440\u044b', useNativeCredits:'\u0411\u0440\u0430\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435 Credits \u0438\u0437 Streamer.bot', blockedNames:'\u0417\u0430\u043f\u0440\u0435\u0442\u043d\u044b\u0435 \u043d\u0438\u043a\u0438', blockedWords:'\u0417\u0430\u043f\u0440\u0435\u0442\u043d\u044b\u0435 \u0441\u043b\u043e\u0432\u0430', replacementName:'\u0417\u0430\u043c\u0435\u043d\u0430 \u043d\u0438\u043a\u0430', replacementText:'\u0417\u0430\u043c\u0435\u043d\u0430 \u0442\u0435\u043a\u0441\u0442\u0430', openMedia:'\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043f\u0430\u043f\u043a\u0443 \u043c\u0435\u0434\u0438\u0430\u0442\u0435\u043a\u0438', loadTestCredits:'\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0435 \u0442\u0438\u0442\u0440\u044b Streamer.bot', sendCustomAlert:'\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u043a\u0430\u0441\u0442\u043e\u043c\u043d\u044b\u0439 \u0430\u043b\u0451\u0440\u0442', addLeaderboardEntry:'\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u0442\u0440\u043e\u043a\u0443 \u0432\u0440\u0443\u0447\u043d\u0443\u044e' });
-    Object.assign(i18n.uk, { filter:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0430', customAlert:'\u0412\u043b\u0430\u0441\u043d\u0438\u0439 \u0442\u0435\u0441\u0442 \u0430\u043b\u0435\u0440\u0442\u0443', timerPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', creditsPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u0442\u0438\u0442\u0440\u0456\u0432', leaderboardPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', leaderboardEntries:'\u0420\u044f\u0434\u043a\u0438 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', blockedEditor:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0435\u043d\u0456 \u043d\u0456\u043a\u0438 \u0442\u0430 \u0441\u043b\u043e\u0432\u0430', mediaPlacement:'\u0420\u043e\u0437\u0442\u0430\u0448\u0443\u0432\u0430\u043d\u043d\u044f \u0432\u0456\u0437\u0443\u0430\u043b\u0443', textAlign:'\u0412\u0438\u0440\u0456\u0432\u043d\u044e\u0432\u0430\u043d\u043d\u044f \u0442\u0435\u043a\u0441\u0442\u0443', donorX:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 X', donorY:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 Y', amountX:'\u0421\u0443\u043c\u0430 X', amountY:'\u0421\u0443\u043c\u0430 Y', messageX:'\u041f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f X', messageY:'\u041f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f Y', timerMode:'\u0420\u0435\u0436\u0438\u043c \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerConversion:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0440\u044f\u0434\u043e\u043a \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0456\u0457', timerServices:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438 \u0432 \u0442\u0430\u0439\u043c\u0435\u0440\u0456', lastDonationSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0440\u044f\u0434\u043a\u0430 \u0434\u043e\u043d\u0430\u0442\u0443', lastDonationAlign:'\u041f\u043e\u0437\u0438\u0446\u0456\u044f \u0440\u044f\u0434\u043a\u0430 \u0434\u043e\u043d\u0430\u0442\u0443', rollSeconds:'\u0411\u0430\u0437\u043e\u0432\u0430 \u0442\u0440\u0438\u0432\u0430\u043b\u0456\u0441\u0442\u044c, \u0441\u0435\u043a\u0443\u043d\u0434\u0438', lockCreditsSpeed:'\u041d\u0435 \u043f\u0440\u0438\u0441\u043a\u043e\u0440\u044e\u0432\u0430\u0442\u0438 \u0434\u043e\u0432\u0433\u0456 \u0442\u0438\u0442\u0440\u0438', useNativeCredits:'\u0411\u0440\u0430\u0442\u0438 \u0434\u0430\u043d\u0456 Credits \u0437 Streamer.bot', blockedNames:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0435\u043d\u0456 \u043d\u0456\u043a\u0438', blockedWords:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0435\u043d\u0456 \u0441\u043b\u043e\u0432\u0430', replacementName:'\u0417\u0430\u043c\u0456\u043d\u0430 \u043d\u0456\u043a\u0430', replacementText:'\u0417\u0430\u043c\u0456\u043d\u0430 \u0442\u0435\u043a\u0441\u0442\u0443', openMedia:'\u0412\u0456\u0434\u043a\u0440\u0438\u0442\u0438 \u043f\u0430\u043f\u043a\u0443 \u043c\u0435\u0434\u0456\u0430\u0442\u0435\u043a\u0438', loadTestCredits:'\u0417\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u0442\u0435\u0441\u0442\u043e\u0432\u0456 \u0442\u0438\u0442\u0440\u0438 Streamer.bot', sendCustomAlert:'\u041d\u0430\u0434\u0456\u0441\u043b\u0430\u0442\u0438 \u0432\u043b\u0430\u0441\u043d\u0438\u0439 \u0430\u043b\u0435\u0440\u0442', addLeaderboardEntry:'\u0414\u043e\u0434\u0430\u0442\u0438 \u0440\u044f\u0434\u043e\u043a \u0432\u0440\u0443\u0447\u043d\u0443' });
+    Object.assign(i18n.en, { filter:'Blocked', customAlert:'Custom test alert', timerPresets:'Timer presets', creditsPresets:'Credits presets', leaderboardPresets:'Leaderboard presets', leaderboardEntries:'Leaderboard entries', blockedEditor:'Blocked names and words', mediaPlacement:'Visual placement', textAlign:'Text align', donorX:'Donor X', donorY:'Donor Y', amountX:'Amount X', amountY:'Amount Y', messageX:'Message X', messageY:'Message Y', timerMode:'Timer mode', timerConversion:'Show conversion line', timerServices:'Show providers in timer', lastDonationSize:'Last donation size', lastDonationAlign:'Last donation align', rollSeconds:'Credits speed', lockCreditsSpeed:'Keep fixed speed for long credits', useNativeCredits:'Use Streamer.bot Credits data', blockedNames:'Blocked nicknames', blockedWords:'Blocked words', replacementName:'Replacement nickname', replacementText:'Replacement text', openMedia:'Open media folder', loadTestCredits:'Load Streamer.bot test credits', sendCustomAlert:'Send custom alert', addLeaderboardEntry:'Add manual row' });
+    Object.assign(i18n.ru, { filter:'\u0417\u0430\u043f\u0440\u0435\u0442', customAlert:'\u041a\u0430\u0441\u0442\u043e\u043c\u043d\u044b\u0439 \u0442\u0435\u0441\u0442 \u0430\u043b\u0451\u0440\u0442\u0430', timerPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u0442\u0430\u0439\u043c\u0435\u0440\u0430', creditsPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u0442\u0438\u0442\u0440\u043e\u0432', leaderboardPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u044b \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', leaderboardEntries:'\u0421\u0442\u0440\u043e\u043a\u0438 \u043b\u0438\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0430', blockedEditor:'\u0417\u0430\u043f\u0440\u0435\u0442\u043d\u044b\u0435 \u043d\u0438\u043a\u0438 \u0438 \u0441\u043b\u043e\u0432\u0430', mediaPlacement:'\u0420\u0430\u0441\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0432\u0438\u0437\u0443\u0430\u043b\u0430', textAlign:'\u0412\u044b\u0440\u0430\u0432\u043d\u0438\u0432\u0430\u043d\u0438\u0435 \u0442\u0435\u043a\u0441\u0442\u0430', donorX:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 X', donorY:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 Y', amountX:'\u0421\u0443\u043c\u043c\u0430 X', amountY:'\u0421\u0443\u043c\u043c\u0430 Y', messageX:'\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 X', messageY:'\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 Y', timerMode:'\u0420\u0435\u0436\u0438\u043c \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerConversion:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u0441\u0442\u0440\u043e\u043a\u0443 \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0438\u0438', timerServices:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438 \u0432 \u0442\u0430\u0439\u043c\u0435\u0440\u0435', lastDonationSize:'\u0420\u0430\u0437\u043c\u0435\u0440 \u0441\u0442\u0440\u043e\u043a\u0438 \u0434\u043e\u043d\u0430\u0442\u0430', lastDonationAlign:'\u041f\u043e\u0437\u0438\u0446\u0438\u044f \u0441\u0442\u0440\u043e\u043a\u0438 \u0434\u043e\u043d\u0430\u0442\u0430', rollSeconds:'\u0421\u043a\u043e\u0440\u043e\u0441\u0442\u044c \u0442\u0438\u0442\u0440\u043e\u0432', lockCreditsSpeed:'\u041d\u0435 \u0443\u0441\u043a\u043e\u0440\u044f\u0442\u044c \u0434\u043b\u0438\u043d\u043d\u044b\u0435 \u0442\u0438\u0442\u0440\u044b', useNativeCredits:'\u0411\u0440\u0430\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435 Credits \u0438\u0437 Streamer.bot', blockedNames:'\u0417\u0430\u043f\u0440\u0435\u0442\u043d\u044b\u0435 \u043d\u0438\u043a\u0438', blockedWords:'\u0417\u0430\u043f\u0440\u0435\u0442\u043d\u044b\u0435 \u0441\u043b\u043e\u0432\u0430', replacementName:'\u0417\u0430\u043c\u0435\u043d\u0430 \u043d\u0438\u043a\u0430', replacementText:'\u0417\u0430\u043c\u0435\u043d\u0430 \u0442\u0435\u043a\u0441\u0442\u0430', openMedia:'\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u043f\u0430\u043f\u043a\u0443 \u043c\u0435\u0434\u0438\u0430\u0442\u0435\u043a\u0438', loadTestCredits:'\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0435 \u0442\u0438\u0442\u0440\u044b Streamer.bot', sendCustomAlert:'\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u043a\u0430\u0441\u0442\u043e\u043c\u043d\u044b\u0439 \u0430\u043b\u0451\u0440\u0442', addLeaderboardEntry:'\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0441\u0442\u0440\u043e\u043a\u0443 \u0432\u0440\u0443\u0447\u043d\u0443\u044e' });
+    Object.assign(i18n.uk, { filter:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0430', customAlert:'\u0412\u043b\u0430\u0441\u043d\u0438\u0439 \u0442\u0435\u0441\u0442 \u0430\u043b\u0435\u0440\u0442\u0443', timerPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', creditsPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u0442\u0438\u0442\u0440\u0456\u0432', leaderboardPresets:'\u041f\u0440\u0435\u0441\u0435\u0442\u0438 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', leaderboardEntries:'\u0420\u044f\u0434\u043a\u0438 \u043b\u0456\u0434\u0435\u0440\u0431\u043e\u0440\u0434\u0443', blockedEditor:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0435\u043d\u0456 \u043d\u0456\u043a\u0438 \u0442\u0430 \u0441\u043b\u043e\u0432\u0430', mediaPlacement:'\u0420\u043e\u0437\u0442\u0430\u0448\u0443\u0432\u0430\u043d\u043d\u044f \u0432\u0456\u0437\u0443\u0430\u043b\u0443', textAlign:'\u0412\u0438\u0440\u0456\u0432\u043d\u044e\u0432\u0430\u043d\u043d\u044f \u0442\u0435\u043a\u0441\u0442\u0443', donorX:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 X', donorY:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440 Y', amountX:'\u0421\u0443\u043c\u0430 X', amountY:'\u0421\u0443\u043c\u0430 Y', messageX:'\u041f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f X', messageY:'\u041f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f Y', timerMode:'\u0420\u0435\u0436\u0438\u043c \u0442\u0430\u0439\u043c\u0435\u0440\u0430', timerConversion:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u0440\u044f\u0434\u043e\u043a \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0456\u0457', timerServices:'\u041f\u043e\u043a\u0430\u0437\u0430\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438 \u0432 \u0442\u0430\u0439\u043c\u0435\u0440\u0456', lastDonationSize:'\u0420\u043e\u0437\u043c\u0456\u0440 \u0440\u044f\u0434\u043a\u0430 \u0434\u043e\u043d\u0430\u0442\u0443', lastDonationAlign:'\u041f\u043e\u0437\u0438\u0446\u0456\u044f \u0440\u044f\u0434\u043a\u0430 \u0434\u043e\u043d\u0430\u0442\u0443', rollSeconds:'\u0428\u0432\u0438\u0434\u043a\u0456\u0441\u0442\u044c \u0442\u0438\u0442\u0440\u0456\u0432', lockCreditsSpeed:'\u041d\u0435 \u043f\u0440\u0438\u0441\u043a\u043e\u0440\u044e\u0432\u0430\u0442\u0438 \u0434\u043e\u0432\u0433\u0456 \u0442\u0438\u0442\u0440\u0438', useNativeCredits:'\u0411\u0440\u0430\u0442\u0438 \u0434\u0430\u043d\u0456 Credits \u0437 Streamer.bot', blockedNames:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0435\u043d\u0456 \u043d\u0456\u043a\u0438', blockedWords:'\u0417\u0430\u0431\u043e\u0440\u043e\u043d\u0435\u043d\u0456 \u0441\u043b\u043e\u0432\u0430', replacementName:'\u0417\u0430\u043c\u0456\u043d\u0430 \u043d\u0456\u043a\u0430', replacementText:'\u0417\u0430\u043c\u0456\u043d\u0430 \u0442\u0435\u043a\u0441\u0442\u0443', openMedia:'\u0412\u0456\u0434\u043a\u0440\u0438\u0442\u0438 \u043f\u0430\u043f\u043a\u0443 \u043c\u0435\u0434\u0456\u0430\u0442\u0435\u043a\u0438', loadTestCredits:'\u0417\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u0442\u0435\u0441\u0442\u043e\u0432\u0456 \u0442\u0438\u0442\u0440\u0438 Streamer.bot', sendCustomAlert:'\u041d\u0430\u0434\u0456\u0441\u043b\u0430\u0442\u0438 \u0432\u043b\u0430\u0441\u043d\u0438\u0439 \u0430\u043b\u0435\u0440\u0442', addLeaderboardEntry:'\u0414\u043e\u0434\u0430\u0442\u0438 \u0440\u044f\u0434\u043e\u043a \u0432\u0440\u0443\u0447\u043d\u0443' });
     Object.assign(i18n.en, { creditsSpeedAuto:'Roll speed is calculated automatically from the amount of information.' });
     Object.assign(i18n.ru, { creditsSpeedAuto:'\u0421\u043a\u043e\u0440\u043e\u0441\u0442\u044c \u0442\u0438\u0442\u0440\u043e\u0432 \u0440\u0430\u0441\u0441\u0447\u0438\u0442\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443 \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u0438.' });
     Object.assign(i18n.uk, { creditsSpeedAuto:'\u0428\u0432\u0438\u0434\u043a\u0456\u0441\u0442\u044c \u0442\u0438\u0442\u0440\u0456\u0432 \u0440\u043e\u0437\u0440\u0430\u0445\u043e\u0432\u0443\u0454\u0442\u044c\u0441\u044f \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u043d\u043e \u0437\u0430 \u043e\u0431\u0441\u044f\u0433\u043e\u043c \u0456\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0456\u0457.' });
     Object.assign(i18n.en, { providersPage:'Connect providers', previewGrid:'Grid' });
     Object.assign(i18n.ru, { providersPage:'\u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u043f\u043b\u043e\u0449\u0430\u0434\u043a\u0438', previewGrid:'\u0421\u0435\u0442\u043a\u0430' });
     Object.assign(i18n.uk, { providersPage:'\u041f\u0456\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438', previewGrid:'\u0421\u0456\u0442\u043a\u0430' });
-    Object.assign(i18n.en, { exportSettings:'Export settings', importSettings:'Import settings', profileNote:'Profiles contain widget settings, but not provider tokens or media library files.', settingsExported:'Settings profile exported', settingsImported:'Settings profile imported' });
-    Object.assign(i18n.ru, { exportSettings:'\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0440\u043e\u0444\u0438\u043b\u044c', importSettings:'\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u043f\u0440\u043e\u0444\u0438\u043b\u044c', profileNote:'\u041f\u0440\u043e\u0444\u0438\u043b\u044c \u0445\u0440\u0430\u043d\u0438\u0442 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0432\u0438\u0434\u0436\u0435\u0442\u043e\u0432, \u043d\u043e \u043d\u0435 \u0442\u043e\u043a\u0435\u043d\u044b \u043f\u043b\u043e\u0449\u0430\u0434\u043e\u043a \u0438 \u043d\u0435 \u0444\u0430\u0439\u043b\u044b \u043c\u0435\u0434\u0438\u0430\u0442\u0435\u043a\u0438.', settingsExported:'\u041f\u0440\u043e\u0444\u0438\u043b\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d', settingsImported:'\u041f\u0440\u043e\u0444\u0438\u043b\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d' });
-    Object.assign(i18n.uk, { exportSettings:'\u0417\u0431\u0435\u0440\u0435\u0433\u0442\u0438 \u043f\u0440\u043e\u0444\u0456\u043b\u044c', importSettings:'\u0417\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u043f\u0440\u043e\u0444\u0456\u043b\u044c', profileNote:'\u041f\u0440\u043e\u0444\u0456\u043b\u044c \u043c\u0456\u0441\u0442\u0438\u0442\u044c \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u043d\u044f \u0432\u0456\u0434\u0436\u0435\u0442\u0456\u0432, \u0430\u043b\u0435 \u043d\u0435 \u0442\u043e\u043a\u0435\u043d\u0438 \u043f\u043b\u0430\u0442\u0444\u043e\u0440\u043c \u0456 \u043d\u0435 \u0444\u0430\u0439\u043b\u0438 \u043c\u0435\u0434\u0456\u0430\u0442\u0435\u043a\u0438.', settingsExported:'\u041f\u0440\u043e\u0444\u0456\u043b\u044c \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u044c \u0437\u0431\u0435\u0440\u0435\u0436\u0435\u043d\u043e', settingsImported:'\u041f\u0440\u043e\u0444\u0456\u043b\u044c \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u044c \u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0435\u043d\u043e' });
+    Object.assign(i18n.en, { exportSettings:'Export settings', importSettings:'Import settings', profileNote:'Profiles contain widget settings and used media files, but not provider tokens.', settingsExported:'Settings profile exported', settingsImported:'Settings profile imported' });
+    Object.assign(i18n.ru, { exportSettings:'\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0440\u043e\u0444\u0438\u043b\u044c', importSettings:'\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u043f\u0440\u043e\u0444\u0438\u043b\u044c', profileNote:'Профиль хранит настройки виджетов и используемые медиа, но не токены площадок.', settingsExported:'\u041f\u0440\u043e\u0444\u0438\u043b\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d', settingsImported:'\u041f\u0440\u043e\u0444\u0438\u043b\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043a \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d' });
+    Object.assign(i18n.uk, { exportSettings:'\u0417\u0431\u0435\u0440\u0435\u0433\u0442\u0438 \u043f\u0440\u043e\u0444\u0456\u043b\u044c', importSettings:'\u0417\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0438\u0442\u0438 \u043f\u0440\u043e\u0444\u0456\u043b\u044c', profileNote:'Профіль містить налаштування віджетів і використані медіафайли, але не токени платформ.', settingsExported:'\u041f\u0440\u043e\u0444\u0456\u043b\u044c \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u044c \u0437\u0431\u0435\u0440\u0435\u0436\u0435\u043d\u043e', settingsImported:'\u041f\u0440\u043e\u0444\u0456\u043b\u044c \u043d\u0430\u043b\u0430\u0448\u0442\u0443\u0432\u0430\u043d\u044c \u0437\u0430\u0432\u0430\u043d\u0442\u0430\u0436\u0435\u043d\u043e' });
     Object.assign(i18n.en, { recommendedObsSize:'Recommended OBS Browser Source size: ', mediaDrop:'Drop PNG/JPG/GIF/MP4/WebM/MP3/WAV here or click', noVisual:'No visual', noSound:'No sound', noTextSound:'No text sound', previewFile:'Preview', builtIn:'built-in', name:'Name', saveRow:'Save row', deleteRow:'Delete row', timerNote:'Example: amount 100 and seconds 3600 means 100 RUB = 60 min.', servicesNote:'Only enabled providers are shown. Clear a checkbox to hide a provider from Goal.', creditsNote:'Streamer.bot HTTP Server must be enabled on 127.0.0.1:7474. DonConnect falls back to local examples if it is unavailable.', leaderboardNote:'Add a custom row or edit names from received donations. Deleting a row automatically moves the next place up.', filterNote:'One item per line. The filter changes browser widgets only and keeps original Streamer.bot donation variables untouched.', aboveText:'Above text', belowText:'Below text', leftText:'Left of text', rightText:'Right of text', behindText:'Behind text', contain:'Contain', cover:'Cover', countdownMode:'Countdown: donations add time', countupMode:'Count up: reset to zero on event' });
     Object.assign(i18n.ru, { recommendedObsSize:'Рекомендуемый размер Browser Source в OBS: ', mediaDrop:'Перетащите PNG/JPG/GIF/MP4/WebM/MP3/WAV сюда или нажмите', noVisual:'Без визуала', noSound:'Без звука', noTextSound:'Без звука текста', previewFile:'Просмотр', builtIn:'встроенный', name:'Имя', saveRow:'Сохранить строку', deleteRow:'Удалить строку', timerNote:'Пример: сумма 100 и 3600 секунд означают 100 RUB = 60 мин.', servicesNote:'Показываются только включенные площадки. Снимите галочку, чтобы скрыть площадку из цели.', creditsNote:'В Streamer.bot должен быть включен HTTP Server на 127.0.0.1:7474. Если он недоступен, DonConnect покажет локальные примеры.', leaderboardNote:'Добавьте строку вручную или исправьте имя из полученного доната. После удаления строки следующее место поднимется автоматически.', filterNote:'Один ник или слово на строку. Фильтр меняет только браузерные виджеты и сохраняет исходные переменные доната Streamer.bot.', aboveText:'Над текстом', belowText:'Под текстом', leftText:'Слева от текста', rightText:'Справа от текста', behindText:'За текстом', contain:'Вписать', cover:'Заполнить', countdownMode:'Обратный отсчет: донаты добавляют время', countupMode:'Отсчет вперед: событие сбрасывает таймер до нуля' });
     Object.assign(i18n.uk, { recommendedObsSize:'Рекомендований розмір Browser Source в OBS: ', mediaDrop:'Перетягніть PNG/JPG/GIF/MP4/WebM/MP3/WAV сюди або натисніть', noVisual:'Без візуалу', noSound:'Без звуку', noTextSound:'Без звуку тексту', previewFile:'Перегляд', builtIn:'вбудований', name:'Імʼя', saveRow:'Зберегти рядок', deleteRow:'Видалити рядок', timerNote:'Приклад: сума 100 і 3600 секунд означають 100 RUB = 60 хв.', servicesNote:'Показуються лише увімкнені платформи. Зніміть позначку, щоб приховати платформу з цілі.', creditsNote:'У Streamer.bot має бути увімкнений HTTP Server на 127.0.0.1:7474. Якщо він недоступний, DonConnect покаже локальні приклади.', leaderboardNote:'Додайте рядок вручну або виправте імʼя з отриманого донату. Після видалення рядка наступне місце підніметься автоматично.', filterNote:'Один нік або слово на рядок. Фільтр змінює лише браузерні віджети та зберігає початкові змінні донату Streamer.bot.', aboveText:'Над текстом', belowText:'Під текстом', leftText:'Ліворуч від тексту', rightText:'Праворуч від тексту', behindText:'За текстом', contain:'Вписати', cover:'Заповнити', countdownMode:'Зворотний відлік: донати додають час', countupMode:'Відлік уперед: подія скидає таймер до нуля' });
-    Object.assign(i18n.en, { history:'Repeats', recentDonationsTitle:'Recent donations', noRecentDonations:'No recent donations yet', replay:'Replay', addFont:'Add font', customFontPlaceholder:'Installed font name', fontAdded:'Font added to the selectors', timerCustomTest:'Timer custom test', sendTimerTest:'Send timer test', creditsSections:'Credits sections', transparentBackground:'Transparent background', pauseCredits:'Pause credits preview', resumeCredits:'Resume credits preview', restartCredits:'Restart credits preview', hiddenSectionNote:'Clear a checkbox to hide a section from Streamer.bot Credits.', filterTestDonation:'Blocked test donation', sendFilterTest:'Send blocked test', donationVoice:'Donation voice', testSpeech:'Test voice', speechHint:'Windows reads donation text from DonConnect itself. Pick a voice, enable reading, then press Test voice.', speechTestStarted:'Voice test finished', speechTestFailed:'Voice test failed', speakDonation:'Read donation text aloud', speechVoice:'Voice', speechRate:'Voice speed', speechPitch:'Voice pitch', speechVolume:'Voice volume', defaultVoice:'Default Windows voice', lastTenOnly:'Only the latest 10 rows are shown here.' });
-    Object.assign(i18n.ru, { history:'Повторы', recentDonationsTitle:'Последние донаты', noRecentDonations:'Последних донатов пока нет', replay:'Повторить', addFont:'Добавить шрифт', customFontPlaceholder:'Название установленного шрифта', fontAdded:'Шрифт добавлен в списки выбора', timerCustomTest:'Кастомный тест таймера', sendTimerTest:'Отправить тест таймера', creditsSections:'Секции титров', transparentBackground:'Прозрачный фон', pauseCredits:'Пауза титров', resumeCredits:'Продолжить титры', restartCredits:'Перезапустить титры', hiddenSectionNote:'Снимите галочку, чтобы скрыть секцию из титров Streamer.bot.', filterTestDonation:'Кастомный тест запрета', sendFilterTest:'Отправить тест запрета', donationVoice:'Озвучка доната', testSpeech:'Проверить голос', speechHint:'Текст доната зачитывается голосом Windows прямо из DonConnect. Выбери голос, включи озвучку и нажми проверку.', speechTestStarted:'Проверка голоса выполнена', speechTestFailed:'Проверка голоса не сработала', speakDonation:'Зачитывать текст доната', speechVoice:'Голос', speechRate:'Скорость голоса', speechPitch:'Тон голоса', speechVolume:'Громкость голоса', defaultVoice:'Голос Windows по умолчанию', lastTenOnly:'Здесь показываются только последние 10 строк.' });
-    Object.assign(i18n.uk, { history:'Повтори', recentDonationsTitle:'Останні донати', noRecentDonations:'Останніх донатів поки немає', replay:'Повторити', addFont:'Додати шрифт', customFontPlaceholder:'Назва встановленого шрифту', fontAdded:'Шрифт додано до списків вибору', timerCustomTest:'Власний тест таймера', sendTimerTest:'Надіслати тест таймера', creditsSections:'Секції титрів', transparentBackground:'Прозорий фон', pauseCredits:'Пауза титрів', resumeCredits:'Продовжити титри', restartCredits:'Перезапустити титри', hiddenSectionNote:'Зніміть позначку, щоб приховати секцію з титрів Streamer.bot.', filterTestDonation:'Власний тест заборони', sendFilterTest:'Надіслати тест заборони', donationVoice:'Озвучення донату', testSpeech:'Перевірити голос', speechHint:'Текст донату читається голосом Windows прямо з DonConnect. Обери голос, увімкни озвучення і натисни перевірку.', speechTestStarted:'Перевірку голосу виконано', speechTestFailed:'Перевірка голосу не спрацювала', speakDonation:'Зачитувати текст донату', speechVoice:'Голос', speechRate:'Швидкість голосу', speechPitch:'Тон голосу', speechVolume:'Гучність голосу', defaultVoice:'Голос Windows за замовчуванням', lastTenOnly:'Тут показуються лише останні 10 рядків.' });
+    Object.assign(i18n.en, { history:'Repeats', recentDonationsTitle:'Recent donations', noRecentDonations:'No recent donations yet', replay:'Replay', addFont:'Add font', customFontPlaceholder:'Installed font name', fontAdded:'Font added to the selectors', timerCustomTest:'Timer custom test', sendTimerTest:'Send timer test', creditsSections:'Credits sections', transparentBackground:'Transparent background', pauseCredits:'Pause credits preview', resumeCredits:'Resume credits preview', restartCredits:'Restart credits preview', hiddenSectionNote:'Clear a checkbox to hide a section from Streamer.bot Credits.', filterTestDonation:'Blocked test donation', sendFilterTest:'Send blocked test', donationVoice:'Donation voice', testSpeech:'Test voice', speechHint:'Windows reads donation text from DonConnect itself. Pick a voice, enable reading, then press Test voice.', speechTestStarted:'Voice test finished', speechTestFailed:'Voice test failed', speakDonation:'Read donation text aloud', speechVoice:'Voice', speechRate:'Voice speed', speechPitch:'Voice pitch', speechVolume:'Voice volume', defaultVoice:'Default Windows voice', lastTenOnly:'Only the latest 10 rows are shown here.', openDonationLogs:'Open daily donation logs folder', donationLogsOpened:'Daily donation logs folder opened' });
+    Object.assign(i18n.ru, { history:'Повторы', recentDonationsTitle:'Последние донаты', noRecentDonations:'Последних донатов пока нет', replay:'Повторить', addFont:'Добавить шрифт', customFontPlaceholder:'Название установленного шрифта', fontAdded:'Шрифт добавлен в списки выбора', timerCustomTest:'Кастомный тест таймера', sendTimerTest:'Отправить тест таймера', creditsSections:'Секции титров', transparentBackground:'Прозрачный фон', pauseCredits:'Пауза титров', resumeCredits:'Продолжить титры', restartCredits:'Перезапустить титры', hiddenSectionNote:'Снимите галочку, чтобы скрыть секцию из титров Streamer.bot.', filterTestDonation:'Кастомный тест запрета', sendFilterTest:'Отправить тест запрета', donationVoice:'Озвучка доната', testSpeech:'Проверить голос', speechHint:'Текст доната зачитывается голосом Windows прямо из DonConnect. Выбери голос, включи озвучку и нажми проверку.', speechTestStarted:'Проверка голоса выполнена', speechTestFailed:'Проверка голоса не сработала', speakDonation:'Зачитывать текст доната', speechVoice:'Голос', speechRate:'Скорость голоса', speechPitch:'Тон голоса', speechVolume:'Громкость голоса', defaultVoice:'Голос Windows по умолчанию', lastTenOnly:'Здесь показываются только последние 10 строк.', openDonationLogs:'Открыть папку логов по дням', donationLogsOpened:'Папка логов донатов по дням открыта' });
+    Object.assign(i18n.uk, { history:'Повтори', recentDonationsTitle:'Останні донати', noRecentDonations:'Останніх донатів поки немає', replay:'Повторити', addFont:'Додати шрифт', customFontPlaceholder:'Назва встановленого шрифту', fontAdded:'Шрифт додано до списків вибору', timerCustomTest:'Власний тест таймера', sendTimerTest:'Надіслати тест таймера', creditsSections:'Секції титрів', transparentBackground:'Прозорий фон', pauseCredits:'Пауза титрів', resumeCredits:'Продовжити титри', restartCredits:'Перезапустити титри', hiddenSectionNote:'Зніміть позначку, щоб приховати секцію з титрів Streamer.bot.', filterTestDonation:'Власний тест заборони', sendFilterTest:'Надіслати тест заборони', donationVoice:'Озвучення донату', testSpeech:'Перевірити голос', speechHint:'Текст донату читається голосом Windows прямо з DonConnect. Обери голос, увімкни озвучення і натисни перевірку.', speechTestStarted:'Перевірку голосу виконано', speechTestFailed:'Перевірка голосу не спрацювала', speakDonation:'Зачитувати текст донату', speechVoice:'Голос', speechRate:'Швидкість голосу', speechPitch:'Тон голосу', speechVolume:'Гучність голосу', defaultVoice:'Голос Windows за замовчуванням', lastTenOnly:'Тут показуються лише останні 10 рядків.', openDonationLogs:'Відкрити папку логів за днями', donationLogsOpened:'Папку логів донатів за днями відкрито' });
     Object.assign(i18n.en, { speechReadDonor:'Read donor name', speechReadAmount:'Read amount', speechReadPlatform:'Read platform', speechReadMessage:'Read message' });
     Object.assign(i18n.ru, { speechReadDonor:'Зачитывать имя донатера', speechReadAmount:'Зачитывать сумму', speechReadPlatform:'Зачитывать площадку', speechReadMessage:'Зачитывать сообщение' });
     Object.assign(i18n.uk, { speechReadDonor:'Зачитувати імʼя донатера', speechReadAmount:'Зачитувати суму', speechReadPlatform:'Зачитувати платформу', speechReadMessage:'Зачитувати повідомлення' });
@@ -9617,9 +10790,20 @@ public class DonConnectWidgetServer
     Object.assign(i18n.en, { obsDock:'OBS Dock', history:'OBS Dock', dockNote:'Compact OBS dock with recent donations. Replay only repeats the alert and does not add money to goal, timer, credits or leaderboard.', deleteDonation:'Delete', donationDeleted:'Donation removed from dock history', timerVisibility:'Timer visibility', timerManualNote:'Add time manually when a donation came outside DonConnect. It affects only the timer.', timerTimeAdded:'Timer time added', sendTimerTest:'Add timer time' });
     Object.assign(i18n.ru, { obsDock:'Док OBS', history:'Док OBS', dockNote:'Компактная док-панель OBS с последними донатами. Повтор запускает только алёрт и не добавляет деньги в цель, таймер, титры или лидерборд.', deleteDonation:'Удалить', donationDeleted:'Донат удален из истории дока', timerVisibility:'Что показывать в таймере', timerManualNote:'Добавь время вручную, если донат пришел не через DonConnect. Это влияет только на таймер.', timerTimeAdded:'Время добавлено в таймер', sendTimerTest:'Добавить время' });
     Object.assign(i18n.uk, { obsDock:'Док OBS', history:'Док OBS', dockNote:'Компактна док-панель OBS з останніми донатами. Повтор запускає лише алерт і не додає гроші в ціль, таймер, титри або лідерборд.', deleteDonation:'Видалити', donationDeleted:'Донат видалено з історії дока', timerVisibility:'Що показувати в таймері', timerManualNote:'Додай час вручну, якщо донат прийшов не через DonConnect. Це впливає лише на таймер.', timerTimeAdded:'Час додано в таймер', sendTimerTest:'Додати час' });
-    Object.assign(i18n.en, { donconnectCredits:'DonConnect donations', showNames:'Show donor names', showTestCredits:'Show test credits', showLiveCredits:'Return to live credits', creditsTestEnabled:'Test credits enabled', creditsLiveRestored:'Live Streamer.bot credits restored', creditsNote:'Enabled Credits sections are taken directly from Streamer.bot. Configure their visibility in Streamer.bot; DonConnect adds its donation section separately.' });
-    Object.assign(i18n.ru, { donconnectCredits:'Донаты DonConnect', showNames:'Показывать имена донатеров', showTestCredits:'Показать тестовые титры', showLiveCredits:'Вернуться к реальным титрам', creditsTestEnabled:'Тестовые титры включены', creditsLiveRestored:'Реальные титры Streamer.bot восстановлены', creditsNote:'Активные секции титров берутся прямо из Streamer.bot. Их видимость настраивается в самом Streamer.bot; DonConnect отдельно добавляет секцию донатов.' });
-    Object.assign(i18n.uk, { donconnectCredits:'Донати DonConnect', showNames:'Показувати імена донатерів', showTestCredits:'Показати тестові титри', showLiveCredits:'Повернутися до реальних титрів', creditsTestEnabled:'Тестові титри увімкнено', creditsLiveRestored:'Реальні титри Streamer.bot відновлено', creditsNote:'Активні секції титрів беруться прямо зі Streamer.bot. Їх видимість налаштовується у Streamer.bot; DonConnect окремо додає секцію донатів.' });
+    Object.assign(i18n.en, { donconnectCredits:'DonConnect donations', showNames:'Show donor names', showTestCredits:'Show test credits', showLiveCredits:'Return to live credits', creditsTestEnabled:'Test credits enabled', creditsLiveRestored:'Live Streamer.bot credits restored', creditsNote:'Enabled Credits sections are taken directly from Streamer.bot. Configure their visibility in Streamer.bot; DonConnect adds its donation section separately.', creditsSectionsNote:'Each credits section can have its own display name and title font. Streamer.bot still decides which native sections are collected.' });
+    Object.assign(i18n.ru, { donconnectCredits:'Донаты DonConnect', showNames:'Показывать имена донатеров', showTestCredits:'Показать тестовые титры', showLiveCredits:'Вернуться к реальным титрам', creditsTestEnabled:'Тестовые титры включены', creditsLiveRestored:'Реальные титры Streamer.bot восстановлены', creditsNote:'Активные секции титров берутся прямо из Streamer.bot. Их видимость настраивается в самом Streamer.bot; DonConnect отдельно добавляет секцию донатов.', creditsSectionsNote:'У каждой секции титров теперь можно отдельно задать название и шрифт заголовка. Какие секции собираются, по-прежнему решает Streamer.bot.' });
+    Object.assign(i18n.uk, { donconnectCredits:'Донати DonConnect', showNames:'Показувати імена донатерів', showTestCredits:'Показати тестові титри', showLiveCredits:'Повернутися до реальних титрів', creditsTestEnabled:'Тестові титри увімкнено', creditsLiveRestored:'Реальні титри Streamer.bot відновлено', creditsNote:'Активні секції титрів беруться прямо зі Streamer.bot. Їх видимість налаштовується у Streamer.bot; DonConnect окремо додає секцію донатів.', creditsSectionsNote:'Для кожної секції титрів можна окремо задати назву та шрифт заголовка. Які секції збираються, як і раніше, вирішує Streamer.bot.' });
+    Object.assign(i18n.en, { layers:'Layers', resetLayers:'Reset layer order', moveLayerUp:'Move layer up', moveLayerDown:'Move layer down', layerBackground:'Background', layerMedia:'Media', layerDonor:'Donor', layerAmount:'Amount', layerMessage:'Message', layerPlatform:'Platform', layerTitle:'Header', layerGoalText:'Goal text', layerGoalBar:'Goal bar', layerGoalImage:'Goal image', layerDecor:'Decor image', layerGoalMeta:'Progress text', layerGoalDeadline:'Goal deadline', layerServices:'Providers', layerLastDonation:'Last donation', layerTimerBlock:'Timer block', layerTimerTitle:'Timer title', layerTimerSubtitle:'Timer subtitle', layerTimerValue:'Timer value', layerTimerMeta:'Timer details', layerTimerConversion:'Conversion' });
+    Object.assign(i18n.ru, { layerGoalDeadline:'Таймер сбора' });
+    Object.assign(i18n.uk, { layerGoalDeadline:'Таймер збору' });
+    Object.assign(i18n.ru, { layers:'\u0421\u043b\u043e\u0438', resetLayers:'\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u043f\u043e\u0440\u044f\u0434\u043e\u043a \u0441\u043b\u043e\u0435\u0432', moveLayerUp:'\u041f\u043e\u0434\u043d\u044f\u0442\u044c \u0441\u043b\u043e\u0439', moveLayerDown:'\u041e\u043f\u0443\u0441\u0442\u0438\u0442\u044c \u0441\u043b\u043e\u0439', layerBackground:'\u0424\u043e\u043d', layerMedia:'\u041c\u0435\u0434\u0438\u0430', layerDonor:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440', layerAmount:'\u0421\u0443\u043c\u043c\u0430', layerMessage:'\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435', layerPlatform:'\u041f\u043b\u043e\u0449\u0430\u0434\u043a\u0430', layerTitle:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', layerGoalText:'\u0422\u0435\u043a\u0441\u0442 \u0446\u0435\u043b\u0438', layerGoalBar:'\u041f\u043e\u043b\u043e\u0441\u0430 \u0446\u0435\u043b\u0438', layerGoalImage:'\u041a\u0430\u0440\u0442\u0438\u043d\u043a\u0430 \u0446\u0435\u043b\u0438', layerDecor:'\u0414\u0435\u043a\u043e\u0440', layerGoalMeta:'\u041f\u0440\u043e\u0433\u0440\u0435\u0441\u0441', layerServices:'\u041f\u043b\u043e\u0449\u0430\u0434\u043a\u0438', layerLastDonation:'\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0434\u043e\u043d\u0430\u0442', layerTimerBlock:'\u0411\u043b\u043e\u043a \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerTitle:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerSubtitle:'\u041f\u043e\u0434\u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerValue:'\u0412\u0440\u0435\u043c\u044f', layerTimerMeta:'\u0414\u0435\u0442\u0430\u043b\u0438 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerConversion:'\u041a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0438\u044f' });
+    Object.assign(i18n.uk, { layers:'\u0428\u0430\u0440\u0438', resetLayers:'\u0421\u043a\u0438\u043d\u0443\u0442\u0438 \u043f\u043e\u0440\u044f\u0434\u043e\u043a \u0448\u0430\u0440\u0456\u0432', moveLayerUp:'\u041f\u0456\u0434\u043d\u044f\u0442\u0438 \u0448\u0430\u0440', moveLayerDown:'\u041e\u043f\u0443\u0441\u0442\u0438\u0442\u0438 \u0448\u0430\u0440', layerBackground:'\u0424\u043e\u043d', layerMedia:'\u041c\u0435\u0434\u0456\u0430', layerDonor:'\u0414\u043e\u043d\u0430\u0442\u0435\u0440', layerAmount:'\u0421\u0443\u043c\u0430', layerMessage:'\u041f\u043e\u0432\u0456\u0434\u043e\u043c\u043b\u0435\u043d\u043d\u044f', layerPlatform:'\u041f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0430', layerTitle:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a', layerGoalText:'\u0422\u0435\u043a\u0441\u0442 \u0446\u0456\u043b\u0456', layerGoalBar:'\u0421\u043c\u0443\u0433\u0430 \u0446\u0456\u043b\u0456', layerGoalImage:'\u0417\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u043d\u044f \u0446\u0456\u043b\u0456', layerDecor:'\u0414\u0435\u043a\u043e\u0440', layerGoalMeta:'\u041f\u0440\u043e\u0433\u0440\u0435\u0441', layerServices:'\u041f\u043b\u0430\u0442\u0444\u043e\u0440\u043c\u0438', layerLastDonation:'\u041e\u0441\u0442\u0430\u043d\u043d\u0456\u0439 \u0434\u043e\u043d\u0430\u0442', layerTimerBlock:'\u0411\u043b\u043e\u043a \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerTitle:'\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerSubtitle:'\u041f\u0456\u0434\u0437\u0430\u0433\u043e\u043b\u043e\u0432\u043e\u043a \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerValue:'\u0427\u0430\u0441', layerTimerMeta:'\u0414\u0435\u0442\u0430\u043b\u0456 \u0442\u0430\u0439\u043c\u0435\u0440\u0430', layerTimerConversion:'\u041a\u043e\u043d\u0432\u0435\u0440\u0442\u0430\u0446\u0456\u044f' });
+    Object.assign(i18n.en, { donationLayout:'Alert layout', donorSection:'Donor', amountSection:'Amount', messageSection:'Message', platformSection:'Platform', showDonor:'Show donor', showAmount:'Show amount', showMessage:'Show message', showMedia:'Show media', donorFontSize:'Donor font size', amountFontSize:'Amount font size', messageFontSize:'Message font size', platformFontSize:'Platform font size', donorWidth:'Donor width', donorHeight:'Donor height', donorRotation:'Donor rotation', amountWidth:'Amount width', amountHeight:'Amount height', amountRotation:'Amount rotation', messageWidth:'Message width', messageHeight:'Message height', messageRotation:'Message rotation', platformWidth:'Platform width', platformHeight:'Platform height', platformRotation:'Platform rotation', visualRotation:'Visual rotation', previewSnap:'Snap', rotateElement:'Rotate element', centerElement:'Center element', resetElement:'Reset element', disableElement:'Disable element', nothingToUndo:'Nothing to undo', undoDone:'Previous editor state restored' });
+    Object.assign(i18n.ru, { donationLayout:'Раскладка алёрта', donorSection:'Донатер', amountSection:'Сумма', messageSection:'Сообщение', platformSection:'Площадка', showDonor:'Показать донатера', showAmount:'Показать сумму', showMessage:'Показать сообщение', showMedia:'Показать медиа', donorFontSize:'Размер шрифта донатера', amountFontSize:'Размер шрифта суммы', messageFontSize:'Размер шрифта сообщения', platformFontSize:'Размер шрифта площадки', donorWidth:'Ширина донатера', donorHeight:'Высота донатера', donorRotation:'Поворот донатера', amountWidth:'Ширина суммы', amountHeight:'Высота суммы', amountRotation:'Поворот суммы', messageWidth:'Ширина сообщения', messageHeight:'Высота сообщения', messageRotation:'Поворот сообщения', platformWidth:'Ширина площадки', platformHeight:'Высота площадки', platformRotation:'Поворот площадки', visualRotation:'Поворот медиа', previewSnap:'Прилипание', rotateElement:'Повернуть элемент', centerElement:'Центрировать элемент', resetElement:'Сбросить элемент', disableElement:'Отключить элемент', nothingToUndo:'Нечего отменять', undoDone:'Восстановлен предыдущий шаг редактора' });
+    Object.assign(i18n.uk, { donationLayout:'Розкладка алерту', donorSection:'Донатер', amountSection:'Сума', messageSection:'Повідомлення', platformSection:'Платформа', showDonor:'Показати донатера', showAmount:'Показати суму', showMessage:'Показати повідомлення', showMedia:'Показати медіа', donorFontSize:'Розмір шрифту донатера', amountFontSize:'Розмір шрифту суми', messageFontSize:'Розмір шрифту повідомлення', platformFontSize:'Розмір шрифту платформи', donorWidth:'Ширина донатера', donorHeight:'Висота донатера', donorRotation:'Поворот донатера', amountWidth:'Ширина суми', amountHeight:'Висота суми', amountRotation:'Поворот суми', messageWidth:'Ширина повідомлення', messageHeight:'Висота повідомлення', messageRotation:'Поворот повідомлення', platformWidth:'Ширина платформи', platformHeight:'Висота платформи', platformRotation:'Поворот платформи', visualRotation:'Поворот медіа', previewSnap:'Прилипання', rotateElement:'Повернути елемент', centerElement:'Центрувати елемент', resetElement:'Скинути елемент', disableElement:'Вимкнути елемент', nothingToUndo:'Немає чого скасовувати', undoDone:'Відновлено попередній крок редактора' });
+    Object.assign(i18n.en, { rollSeconds:'Credits speed', lockCreditsSpeed:'Do not speed up long credits', creditsSpeedAuto:'Move the slider right to make credits faster. With the checkbox off, long credits automatically speed up to fit the screen.', slideAnimation:'Slide animation', monthTop:'Top this month', weekTop:'Top this week', streamTop:'Top this stream', textSoundVolume:'Text sound volume' });
+    Object.assign(i18n.ru, { rollSeconds:'Скорость титров', lockCreditsSpeed:'Не ускорять длинные титры', creditsSpeedAuto:'Чем правее ползунок, тем быстрее идут титры. Если галочка выключена, длинные титры автоматически ускоряются, чтобы помещаться в общий показ.', slideAnimation:'Анимация смены', monthTop:'Топ за месяц', weekTop:'Топ за неделю', streamTop:'Топ за стрим', textSoundVolume:'Громкость звука текста' });
+    Object.assign(i18n.uk, { rollSeconds:'Швидкість титрів', lockCreditsSpeed:'Не прискорювати довгі титри', creditsSpeedAuto:'Що правіше повзунок, то швидше йдуть титри. Якщо позначку вимкнено, довгі титри автоматично пришвидшуються, щоб поміститися в загальний показ.', slideAnimation:'Анімація зміни', monthTop:'Топ за місяць', weekTop:'Топ за тиждень', streamTop:'Топ за стрім', textSoundVolume:'Гучність звуку тексту' });
     boot();
     async function boot() {
       try {
@@ -9644,6 +10828,7 @@ public class DonConnectWidgetServer
       setHtml('creditsPresets', presetButtons(creditsPresets, 'credits-preset'));
       setHtml('leaderboardPresets', presetButtons(leaderboardPresets, 'leaderboard-preset'));
       safeRun(initLanguage);
+      safeRun(renderCreditsSectionRows);
       safeRun(populateFontList);
       safeRun(populateSpeechVoices);
       safeRun(renderAlertMediaLibrary);
@@ -9655,6 +10840,7 @@ public class DonConnectWidgetServer
       safeRun(bindAlertMediaUpload);
       safeRun(() => bindImageUpload('goalDrop', 'goalImageFile', 'clearGoalImage', 'GoalImageDataUrl', 'GoalImageName', 'ShowGoalImage'));
       safeRun(() => bindImageUpload('decorDrop', 'decorImageFile', 'clearDecorImage', 'DecorImageDataUrl', 'DecorImageName', 'ShowDecorImage'));
+      safeRun(() => bindImageUpload('timerDecorDrop', 'timerDecorImageFile', 'clearTimerDecorImage', 'TimerDecorImageDataUrl', 'TimerDecorImageName', 'ShowTimerDecorImage'));
       safeRun(enableSections);
       safeRun(hideBaseFontRows);
       safeRun(translate);
@@ -9694,48 +10880,71 @@ public class DonConnectWidgetServer
       const resetLeaderboard = document.getElementById('resetLeaderboardData'); if (resetLeaderboard) resetLeaderboard.addEventListener('click', resetLeaderboardData);
       const addLeaderboard = document.getElementById('addLeaderboardEntry'); if (addLeaderboard) addLeaderboard.addEventListener('click', addLeaderboardEntry);
       const openMedia = document.getElementById('openAlertMedia'); if (openMedia) openMedia.addEventListener('click', openAlertMedia);
+      const openLogs = document.getElementById('openDonationLogs'); if (openLogs) openLogs.addEventListener('click', openDonationLogs);
       const customTest = document.getElementById('sendCustomTest'); if (customTest) customTest.addEventListener('click', sendCustomTest);
       const timerTest = document.getElementById('sendTimerTest'); if (timerTest) timerTest.addEventListener('click', sendTimerTest);
       const filterTest = document.getElementById('sendFilterTest'); if (filterTest) filterTest.addEventListener('click', sendFilterTest);
       const creditsTest = document.getElementById('testCredits'); if (creditsTest) creditsTest.addEventListener('click', testCredits);
       const pauseCredits = document.getElementById('pauseCredits'); if (pauseCredits) pauseCredits.addEventListener('click', toggleCreditsPause);
       const restartCredits = document.getElementById('restartCredits'); if (restartCredits) restartCredits.addEventListener('click', restartCreditsPreview);
+      const goalDeadlineSet = document.getElementById('goalDeadlineSetDuration'); if (goalDeadlineSet) goalDeadlineSet.addEventListener('click', () => applyGoalDeadlineDuration(false));
+      const goalDeadlineExtend = document.getElementById('goalDeadlineExtendDuration'); if (goalDeadlineExtend) goalDeadlineExtend.addEventListener('click', () => applyGoalDeadlineDuration(true));
+      const goalDeadlineStopButton = document.getElementById('goalDeadlineStop'); if (goalDeadlineStopButton) goalDeadlineStopButton.addEventListener('click', stopGoalDeadline);
       const testSpeechButton = document.getElementById('testSpeech'); if (testSpeechButton) testSpeechButton.addEventListener('click', testSpeech);
       if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = populateSpeechVoices;
       const copyButton = document.getElementById('copy'); if (copyButton) copyButton.addEventListener('click', copyObs);
       const copyButton2 = document.getElementById('copy2'); if (copyButton2) copyButton2.addEventListener('click', copyObs);
       const copyDockButton = document.getElementById('copyDockUrl'); if (copyDockButton) copyDockButton.addEventListener('click', copyObs);
       const gridToggle = document.getElementById('gridToggle'); if (gridToggle) { gridToggle.checked = localStorage.getItem('donconnectPreviewGrid') === 'true'; gridToggle.addEventListener('change', () => { localStorage.setItem('donconnectPreviewGrid', gridToggle.checked ? 'true' : 'false'); updatePreviewGrid(); }); }
-      const previewFrame = document.getElementById('frame'); if (previewFrame) { previewFrame.addEventListener('load', () => setTimeout(enableDirectPreviewEditing, 120)); setTimeout(enableDirectPreviewEditing, 300); }
+      const snapToggle = document.getElementById('snapToggle'); if (snapToggle) { snapToggle.checked = localStorage.getItem('donconnectPreviewSnap') !== 'false'; snapToggle.addEventListener('change', () => localStorage.setItem('donconnectPreviewSnap', snapToggle.checked ? 'true' : 'false')); }
+      window.addEventListener('keydown', handleEditorUndo, true); document.addEventListener('keydown', handleEditorUndo, true);
+      const previewFrame = document.getElementById('frame'); if (previewFrame) { previewFrame.tabIndex = 0; previewFrame.addEventListener('load', () => setTimeout(enableDirectPreviewEditing, 120)); previewFrame.addEventListener('mouseenter', () => { try { previewFrame.focus(); } catch {} }); setTimeout(enableDirectPreviewEditing, 300); }
     }
-    function bindPreset(key, presets, apply) { document.querySelectorAll(`[data-${camelToDash(key)}]`).forEach(btn => btn.addEventListener('click', () => { const name = btn.dataset[key]; apply(Object.assign({}, presets[name] || {}), name); fillAll(); sendPreview(); setTimeout(enableDirectPreviewEditing, 80); })); }
+    function bindPreset(key, presets, apply) { document.querySelectorAll(`[data-${camelToDash(key)}]`).forEach(btn => btn.addEventListener('click', () => { captureUndo(active === 'donation' ? 'donation' : active === 'goal' || active === 'timer' ? 'overlay' : active); const name = btn.dataset[key]; apply(Object.assign({}, presets[name] || {}), name); fillAll(); sendPreview(); setTimeout(enableDirectPreviewEditing, 80); })); }
     function creditsPresetText(language, name) { const packs = { en:{ standard:{ Title:'Thanks for watching', Subtitle:'Today with us', Outro:'See you next stream', SectionTitle:'Donations' }, party:{ Title:'What a stream!', Subtitle:'The wonderful people who made it happen', Outro:'See you next time!', SectionTitle:'Donation heroes' } }, ru:{ standard:{ Title:'Спасибо за стрим', Subtitle:'Сегодня с нами', Outro:'До следующего стрима', SectionTitle:'Донаты' }, party:{ Title:'Вот это был стрим!', Subtitle:'Люди, которые сделали этот эфир', Outro:'До скорой встречи!', SectionTitle:'Герои донатов' } }, uk:{ standard:{ Title:'Дякую за стрім', Subtitle:'Сьогодні з нами', Outro:'До наступного стріму', SectionTitle:'Донати' }, party:{ Title:'Оце був стрім!', Subtitle:'Люди, які зробили цей ефір', Outro:'До зустрічі!', SectionTitle:'Герої донатів' } } }; const pack = packs[normalizeLanguage(language)] || packs.en; return Object.assign({}, name === 'Pixel Party' ? pack.party : pack.standard); }
     function camelToDash(value) { return String(value).replace(/[A-Z]/g, ch => '-' + ch.toLowerCase()); }
-    function bindLive(selector, name) { document.querySelectorAll(selector).forEach(el => { const handler = () => update(name === 'donation' ? donation : name === 'overlay' ? overlay : name === 'credits' ? credits : name === 'leaderboard' ? leaderboard : contentFilter, el, name); el.addEventListener('input', handler); el.addEventListener('change', handler); }); }
+    function bindLive(selector, name) { document.querySelectorAll(selector).forEach(el => { const handler = () => { if (!controlUndoArmed.has(el)) { captureUndo(name); controlUndoArmed.add(el); } update(name === 'donation' ? donation : name === 'overlay' ? overlay : name === 'credits' ? credits : name === 'leaderboard' ? leaderboard : contentFilter, el, name); }; const disarm = () => controlUndoArmed.delete(el); el.addEventListener('input', handler); el.addEventListener('change', event => { handler(event); disarm(); }); el.addEventListener('blur', disarm); }); }
+    function historyStore(name) { if (name === 'donation' || name === 'history') return donation; if (name === 'overlay' || name === 'goal' || name === 'timer') return overlay; if (name === 'credits') return credits; if (name === 'leaderboard') return leaderboard; return contentFilter; }
+    function historyScope(name) { if (name === 'history') return 'donation'; if (name === 'goal' || name === 'timer') return 'overlay'; return name || active; }
+    function historyClone(store) { const copy = {}; Object.keys(store || {}).forEach(key => { if (/DataUrl$/i.test(key)) return; const value = store[key]; copy[key] = value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : value; }); return copy; }
+    function captureUndo(name) { const scope = historyScope(name); const values = historyClone(historyStore(scope)); const serialized = JSON.stringify({ scope, values }); if (editorUndo.length && editorUndo[editorUndo.length - 1].serialized === serialized) return; editorUndo.push({ scope, values, serialized }); if (editorUndo.length > editorUndoLimit) editorUndo.shift(); }
+    function undoEditor() { const entry = editorUndo.pop(); if (!entry) { showStatus(t('nothingToUndo')); return; } const target = historyStore(entry.scope); Object.keys(entry.values).forEach(key => target[key] = entry.values[key]); fillAll(); translate(); sendPreview(); setTimeout(enableDirectPreviewEditing, 80); showStatus(t('undoDone')); }
+    function isUndoShortcut(event) { return !!event && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && (String(event.key || '').toLowerCase() === 'z' || event.code === 'KeyZ'); }
+    function handleEditorUndo(event) { if (!isUndoShortcut(event)) return; event.preventDefault(); event.stopPropagation(); undoEditor(); }
     function enableSections() { document.querySelectorAll('fieldset').forEach(fieldset => { fieldset.classList.add('collapsed'); const legend = fieldset.querySelector('legend'); if (!legend) return; legend.addEventListener('click', event => { if (event.target.closest('button,input,select,textarea,label')) return; fieldset.classList.toggle('collapsed'); }); }); }
     let creditsPaused = false;
     let statusTimer = null;
-    function populateFontList() { fonts = normalizeFontCatalog(fonts); const selects = Array.from(document.querySelectorAll('[data-font-select]')); if (!selects.length) return; const windows = uniqueFonts(fonts.windows || []); const google = uniqueFonts(fonts.google || []); const options = '<option value="""">' + t('defaultFont') + '</option>' + fontGroup('Windows', windows) + fontGroup('Google Fonts', google); selects.forEach(select => { const value = select.value; select.innerHTML = options; ensureFontOption(select, value); select.value = value || ''; }); hideBaseFontRows(); }
+    function populateFontList() { fonts = normalizeFontCatalog(fonts); const selects = Array.from(document.querySelectorAll('[data-font-select]')); if (!selects.length) return; const windows = uniqueFonts(fonts.windows || []); const google = uniqueFonts(fonts.google || []); const options = '<option value="""">' + t('defaultFont') + '</option>' + fontGroup('Windows', windows) + fontGroup('Google Fonts', google); selects.forEach(select => { const value = cleanFontName(select.value); select.innerHTML = options; ensureFontOption(select, value); select.value = value || ''; }); hideBaseFontRows(); }
     function hideBaseFontRows() { ['[data-donation=FontFamily]','[data-overlay=FontFamily]','[data-credits=FontFamily]','[data-leaderboard=FontFamily]'].forEach(selector => document.querySelectorAll(selector).forEach(input => { const label = input.closest('label'); if (label) label.style.display = 'none'; })); }
     function populateSpeechVoices() { const select = document.getElementById('speechVoiceSelect'); if (!select) return; const selected = donation.SpeechVoice || select.value || ''; const server = Array.isArray(speechVoices && speechVoices.items) ? speechVoices.items : []; const seen = new Set(); const all = server.filter(voice => { const name = String(voice && voice.name || '').trim(); const key = name.toLowerCase(); if (!name || seen.has(key)) return false; seen.add(key); return true; }); select.innerHTML = '<option value="""">' + escapeHtml(t('defaultVoice')) + '</option>' + all.map(voice => '<option value=""' + escapeAttr(voice.name) + '"">' + escapeHtml(voice.name + (voice.lang ? ' - ' + voice.lang : '') + (voice.source ? ' (' + voice.source + ')' : '')) + '</option>').join(''); ensureFontOption(select, selected); select.value = selected || ''; }
     async function testSpeech() { donation.SpeakDonation = true; sync('[data-donation=SpeakDonation]', true); const result = await post('/donconnect/api/speech-test', donation); if (result && result.ok) showStatus(t('speechTestStarted') + (result.engine ? ' (' + result.engine + ')' : '')); else showStatus(t('speechTestFailed') + ': ' + ((result && result.error) || 'unknown')); }
     function normalizeFontCatalog(source) { return { windows: uniqueFonts([...(fallbackFonts.windows || []), ...fontArray(source && source.windows)]), google: uniqueFonts([...(fallbackFonts.google || []), ...fontArray(source && source.google)]) }; }
     function fontArray(value) { if (Array.isArray(value)) return value; if (!value) return []; return [value]; }
     function cloneFontCatalog(source) { return { windows:[...((source && source.windows) || [])], google:[...((source && source.google) || [])] }; }
-    function uniqueFonts(items) { const seen = new Set(); return items.map(name => String(name || '').trim()).filter(name => name && !seen.has(name.toLowerCase()) && seen.add(name.toLowerCase())); }
+    function cleanFontName(name) { return String(name || '').replace(/[""\\\\]/g, '').replace(/\s+/g, ' ').trim(); }
+    function uniqueFonts(items) { const seen = new Set(); return items.map(cleanFontName).filter(name => name && !seen.has(name.toLowerCase()) && seen.add(name.toLowerCase())); }
     function fontGroup(label, items) { return items.length ? '<optgroup label=""' + escapeAttr(label) + '"">' + items.map(name => '<option value=""' + escapeAttr(name) + '"">' + escapeHtml(name) + '</option>').join('') + '</optgroup>' : ''; }
-    function ensureFontOption(select, value) { const name = String(value || '').trim(); if (!name || Array.from(select.options).some(option => option.value === name)) return; const option = document.createElement('option'); option.value = name; option.textContent = name; select.appendChild(option); }
+    function ensureFontOption(select, value) { const name = cleanFontName(value); if (!name || Array.from(select.options).some(option => option.value === name)) return; const option = document.createElement('option'); option.value = name; option.textContent = name; select.appendChild(option); }
+    function parseKeyValueEntries(value) { return String(value || '').split(/[;\n]/).map(row => { const index = row.indexOf('='); if (index < 1) return null; const key = row.slice(0, index).trim(); const val = row.slice(index + 1).trim(); return key ? { key, value:val } : null; }).filter(Boolean); }
+    function keyValueMap(value) { const map = {}; parseKeyValueEntries(value).forEach(entry => { map[entry.key] = entry.value; }); return map; }
+    function serializeKeyValueMap(map) { return Object.keys(map || {}).filter(key => String(key || '').trim()).map(key => key + '=' + String(map[key] || '').trim()).join(';'); }
+    function fontSelectOptions(selected) { const value = cleanFontName(selected); const windows = uniqueFonts(fonts.windows || []); const google = uniqueFonts(fonts.google || []); const option = name => '<option value=""' + escapeAttr(name) + '""' + (cleanFontName(name) === value ? ' selected' : '') + '>' + escapeHtml(name) + '</option>'; const group = (label, items) => items.length ? '<optgroup label=""' + escapeAttr(label) + '"">' + items.map(option).join('') + '</optgroup>' : ''; const known = [...windows, ...google].some(name => cleanFontName(name) === value); return '<option value="""">' + escapeHtml(t('defaultFont')) + '</option>' + group('Windows', windows) + group('Google Fonts', google) + (value && !known ? option(value) : ''); }
+    function creditsSectionKeys(labels, fontsMap) { const keys = []; const add = key => { key = String(key || '').trim(); if (key && !keys.includes(key)) keys.push(key); }; parseKeyValueEntries(creditsDefaults.SectionLabels).forEach(entry => add(entry.key)); parseKeyValueEntries(credits.SectionLabels).forEach(entry => add(entry.key)); Object.keys(labels || {}).forEach(add); Object.keys(fontsMap || {}).forEach(add); return keys; }
+    function renderCreditsSectionRows() { const box = document.getElementById('creditsSectionRows'); if (!box) return; const labels = keyValueMap(credits.SectionLabels || creditsDefaults.SectionLabels); const fontsMap = keyValueMap(credits.SectionFonts || ''); const keys = creditsSectionKeys(labels, fontsMap); box.innerHTML = keys.map(key => '<div class=""credits-section-row"" data-section-key=""' + escapeAttr(key) + '""><div class=""credits-section-key"" title=""' + escapeAttr(key) + '"">' + escapeHtml(key) + '</div><label><span>' + escapeHtml(t('sectionDisplayName')) + '</span><input type=""text"" data-section-label value=""' + escapeAttr(labels[key] || key) + '""></label><label><span>' + escapeHtml(t('sectionTitleFont')) + '</span><select data-section-font>' + fontSelectOptions(fontsMap[key] || '') + '</select></label></div>').join(''); box.querySelectorAll('[data-section-label],[data-section-font]').forEach(input => { input.addEventListener('input', updateCreditsSectionRows); input.addEventListener('change', updateCreditsSectionRows); }); }
+    function updateCreditsSectionRows() { const box = document.getElementById('creditsSectionRows'); if (!box) return; const labels = {}, fontsMap = {}; box.querySelectorAll('[data-section-key]').forEach(row => { const key = row.dataset.sectionKey; const label = row.querySelector('[data-section-label]'); const font = row.querySelector('[data-section-font]'); labels[key] = label && label.value.trim() ? label.value.trim() : key; const fontName = cleanFontName(font && font.value); if (fontName) fontsMap[key] = fontName; }); credits.SectionLabels = serializeKeyValueMap(labels); credits.SectionFonts = serializeKeyValueMap(fontsMap); sync('[data-credits=""SectionLabels""]', credits.SectionLabels); sync('[data-credits=""SectionFonts""]', credits.SectionFonts); sendPreview(); }
     function bindImageUpload(dropId, inputId, clearId, dataKey, nameKey, showKey) { const drop = document.getElementById(dropId); const fileInput = document.getElementById(inputId); const clear = document.getElementById(clearId); if (!drop || !fileInput) return; drop.addEventListener('click', () => fileInput.click()); drop.addEventListener('dragover', event => { event.preventDefault(); drop.classList.add('drag'); }); drop.addEventListener('dragleave', () => drop.classList.remove('drag')); drop.addEventListener('drop', event => { event.preventDefault(); drop.classList.remove('drag'); const file = event.dataTransfer.files && event.dataTransfer.files[0]; if (file) readImageFile(file, dataKey, nameKey, showKey); }); fileInput.addEventListener('change', () => { const file = fileInput.files && fileInput.files[0]; if (file) readImageFile(file, dataKey, nameKey, showKey); fileInput.value = ''; }); if (clear) clear.addEventListener('click', () => { overlay[dataKey] = ''; overlay[nameKey] = ''; overlay[showKey] = false; fillAll(); sendPreview(); }); }
     function readImageFile(file, dataKey, nameKey, showKey) { if (!file || !/^image\//.test(file.type)) return; const reader = new FileReader(); reader.onload = () => { overlay[dataKey] = String(reader.result || ''); overlay[nameKey] = file.name || ''; overlay[showKey] = true; fillAll(); sendPreview(); }; reader.readAsDataURL(file); }
-    function bindAlertMediaUpload() { const drop = document.getElementById('alertMediaDrop'); const input = document.getElementById('alertMediaFile'); if (!drop || !input) return; drop.addEventListener('click', () => input.click()); drop.addEventListener('dragover', event => { event.preventDefault(); drop.classList.add('drag'); }); drop.addEventListener('dragleave', () => drop.classList.remove('drag')); drop.addEventListener('drop', event => { event.preventDefault(); drop.classList.remove('drag'); uploadAlertFiles(event.dataTransfer.files); }); input.addEventListener('change', () => { uploadAlertFiles(input.files); input.value = ''; }); }
+    function bindAlertMediaUpload() { bindAlertMediaDrop('alertMediaDrop', 'alertMediaFile'); bindAlertMediaDrop('leaderboardMediaDrop', 'leaderboardMediaFile'); }
+    function bindAlertMediaDrop(dropId, inputId) { const drop = document.getElementById(dropId); const input = document.getElementById(inputId); if (!drop || !input) return; drop.addEventListener('click', () => input.click()); drop.addEventListener('dragover', event => { event.preventDefault(); drop.classList.add('drag'); }); drop.addEventListener('dragleave', () => drop.classList.remove('drag')); drop.addEventListener('drop', event => { event.preventDefault(); drop.classList.remove('drag'); uploadAlertFiles(event.dataTransfer.files); }); input.addEventListener('change', () => { uploadAlertFiles(input.files); input.value = ''; }); }
     async function uploadAlertFiles(files) { for (const file of Array.from(files || [])) { if (!file || file.size > Number(alertMedia.maxUploadBytes || 33554432)) { showStatus('File is too large. Maximum: 32 MB'); continue; } try { const data = await readFileDataUrl(file); alertMedia = await post('/donconnect/api/alert-media-upload', { name:file.name, data }); showStatus(t('uploaded')); } catch (error) { showStatus(error && error.message ? error.message : String(error)); } } renderAlertMediaLibrary(); renderAlertRules(); fillAll(); sendPreview(); }
     function readFileDataUrl(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '')); reader.onerror = () => reject(reader.error || new Error('File read failed')); reader.readAsDataURL(file); }); }
     async function deleteAlertMedia(file) { try { alertMedia = await post('/donconnect/api/alert-media-delete', { file }); pruneAlertMedia(file); renderAlertMediaLibrary(); renderAlertRules(); fillAll(); sendPreview(); showStatus(t('deleted')); } catch (error) { showStatus(error && error.message ? error.message : String(error)); } }
     async function openAlertMedia() { try { const result = await post('/donconnect/api/alert-media-open', {}); showStatus(result.directory || alertMedia.directory || 'Media folder opened'); } catch (error) { showStatus(error && error.message ? error.message : String(error)); } }
+    async function openDonationLogs() { try { const result = await post('/donconnect/api/donation-logs-open', {}); const path = result.directory || ''; const target = document.getElementById('donationLogsPath'); if (target) target.textContent = path; showStatus(path || t('donationLogsOpened')); } catch (error) { showStatus(error && error.message ? error.message : String(error)); } }
     function previewAlertMedia(file, kind) { const url = mediaUrl(file); if (kind === 'audio') { try { const audio = new Audio(url); audio.volume = .8; audio.play().catch(() => {}); } catch {} return; } window.open(url, '_blank', 'noopener,noreferrer'); }
     function mediaUrl(file) { return '/donconnect/media/' + String(file || '').split('/').map(encodeURIComponent).join('/'); }
-    function pruneAlertMedia(file) { if (donation.MediaFile === file) donation.MediaFile = ''; if (donation.SoundFile === file) donation.SoundFile = ''; if (donation.TextSoundFile === file) donation.TextSoundFile = ''; (donation.AlertRules || []).forEach(rule => { rule.MediaFiles = (rule.MediaFiles || []).filter(value => value !== file); rule.SoundFiles = (rule.SoundFiles || []).filter(value => value !== file); }); }
-    function renderAlertMediaLibrary() { const items = Array.isArray(alertMedia && alertMedia.items) ? alertMedia.items : []; const visuals = items.filter(item => item.kind === 'image' || item.kind === 'video'); const sounds = items.filter(item => item.kind === 'audio'); setOptions('alertMediaSelect', visuals, donation.MediaFile, t('noVisual')); setOptions('alertSoundSelect', sounds, donation.SoundFile, t('noSound')); setOptions('alertTextSoundSelect', sounds, donation.TextSoundFile, t('noTextSound')); const path = document.getElementById('alertMediaPath'); if (path) path.textContent = alertMedia.directory || ''; const grid = document.getElementById('alertMediaGrid'); if (!grid) return; grid.innerHTML = items.map(item => `<div class='media-item'><div class='media-thumb'>${item.kind === 'image' ? `<img loading='lazy' src='${escapeAttr(item.url)}' alt=''>` : escapeHtml(item.kind === 'audio' ? 'AUDIO' : 'VIDEO')}</div><span>${escapeHtml(item.name || item.file)}<small>${escapeHtml(item.kind || '')} | ${formatBytes(item.bytes || 0)}${item.builtin ? ' | ' + escapeHtml(t('builtIn')) : ''}</small></span><div class='media-actions'><button type='button' data-preview-alert-media='${escapeAttr(item.file)}' data-kind='${escapeAttr(item.kind)}'>${escapeHtml(t('previewFile'))}</button><button type='button' data-delete-alert-media='${escapeAttr(item.file)}'>${escapeHtml(t('deleteFile'))}</button></div></div>`).join(''); grid.querySelectorAll('[data-delete-alert-media]').forEach(button => button.addEventListener('click', () => deleteAlertMedia(button.dataset.deleteAlertMedia))); grid.querySelectorAll('[data-preview-alert-media]').forEach(button => button.addEventListener('click', () => previewAlertMedia(button.dataset.previewAlertMedia, button.dataset.kind))); }
+    function pruneAlertMedia(file) { if (donation.MediaFile === file) donation.MediaFile = ''; if (donation.DecorImageFile === file) donation.DecorImageFile = ''; if (leaderboard.DecorImageFile === file) leaderboard.DecorImageFile = ''; if (donation.SoundFile === file) donation.SoundFile = ''; if (donation.TextSoundFile === file) donation.TextSoundFile = ''; (donation.AlertRules || []).forEach(rule => { rule.MediaFiles = (rule.MediaFiles || []).filter(value => value !== file); rule.SoundFiles = (rule.SoundFiles || []).filter(value => value !== file); }); }
+    function renderAlertMediaLibrary() { const items = Array.isArray(alertMedia && alertMedia.items) ? alertMedia.items : []; const visuals = items.filter(item => item.kind === 'image' || item.kind === 'video'); const images = items.filter(item => item.kind === 'image'); const sounds = items.filter(item => item.kind === 'audio'); setOptions('alertMediaSelect', visuals, donation.MediaFile, t('noVisual')); setOptions('alertDecorSelect', images, donation.DecorImageFile, t('noVisual')); setOptions('leaderboardDecorSelect', images, leaderboard.DecorImageFile, t('noVisual')); setOptions('alertSoundSelect', sounds, donation.SoundFile, t('noSound')); setOptions('alertTextSoundSelect', sounds, donation.TextSoundFile, t('noTextSound')); const path = document.getElementById('alertMediaPath'); if (path) path.textContent = alertMedia.directory || ''; const grid = document.getElementById('alertMediaGrid'); if (!grid) return; grid.innerHTML = items.map(item => `<div class='media-item'><div class='media-thumb'>${item.kind === 'image' ? `<img loading='lazy' src='${escapeAttr(item.url)}' alt=''>` : escapeHtml(item.kind === 'audio' ? 'AUDIO' : 'VIDEO')}</div><span>${escapeHtml(item.name || item.file)}<small>${escapeHtml(item.kind || '')} | ${formatBytes(item.bytes || 0)}${item.builtin ? ' | ' + escapeHtml(t('builtIn')) : ''}</small></span><div class='media-actions'><button type='button' data-preview-alert-media='${escapeAttr(item.file)}' data-kind='${escapeAttr(item.kind)}'>${escapeHtml(t('previewFile'))}</button><button type='button' data-delete-alert-media='${escapeAttr(item.file)}'>${escapeHtml(t('deleteFile'))}</button></div></div>`).join(''); grid.querySelectorAll('[data-delete-alert-media]').forEach(button => button.addEventListener('click', () => deleteAlertMedia(button.dataset.deleteAlertMedia))); grid.querySelectorAll('[data-preview-alert-media]').forEach(button => button.addEventListener('click', () => previewAlertMedia(button.dataset.previewAlertMedia, button.dataset.kind))); }
     function setOptions(id, items, selected, emptyText) { const select = document.getElementById(id); if (!select) return; select.innerHTML = `<option value=''>${escapeHtml(emptyText)}</option>` + items.map(item => `<option value='${escapeAttr(item.file)}'>${escapeHtml(item.name || item.file)}</option>`).join(''); select.value = selected || ''; }
     function formatBytes(bytes) { const value = Number(bytes || 0); return value < 1024 * 1024 ? Math.max(1, Math.round(value / 1024)) + ' KB' : (value / 1024 / 1024).toFixed(1) + ' MB'; }
     function renderAlertRules() { const box = document.getElementById('alertRules'); if (!box) return; if (!Array.isArray(donation.AlertRules)) donation.AlertRules = []; box.innerHTML = donation.AlertRules.map((rule, index) => `<div class='rule-card' data-rule-index='${index}'><label><span>${escapeHtml(t('ruleName'))}</span><input data-rule-key='Name' type='text' value='${escapeAttr(rule.Name || '')}'></label><div class='rule-range'><label><span>${escapeHtml(t('minAmount'))}</span><input data-rule-key='MinAmount' type='number' min='0' step='0.01' value='${escapeAttr(rule.MinAmount ?? 0)}'></label><label><span>${escapeHtml(t('maxAmount'))}</span><input data-rule-key='MaxAmount' type='number' min='0' step='0.01' value='${escapeAttr(rule.MaxAmount ?? 0)}'></label></div><label class='check-row'><input data-rule-key='Randomize' type='checkbox' ${rule.Randomize === false ? '' : 'checked'}><span>${escapeHtml(t('randomVariants'))}</span></label><label><span>${escapeHtml(t('visualVariants'))}</span><select data-rule-key='MediaFiles' multiple>${ruleOptions('visual', rule.MediaFiles)}</select></label><label><span>${escapeHtml(t('soundVariants'))}</span><select data-rule-key='SoundFiles' multiple>${ruleOptions('audio', rule.SoundFiles)}</select></label><button type='button' data-remove-rule='${index}'>${escapeHtml(t('removeRule'))}</button></div>`).join(''); box.querySelectorAll('[data-remove-rule]').forEach(button => button.addEventListener('click', () => { donation.AlertRules.splice(Number(button.dataset.removeRule), 1); renderAlertRules(); sendPreview(); })); }
@@ -9745,6 +10954,7 @@ public class DonConnectWidgetServer
       active = urls[tab] ? tab : 'donation';
       document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('active', b.dataset.tab === active));
       document.querySelectorAll('[data-pane]').forEach(p => p.classList.toggle('active', p.dataset.pane === active));
+      renderLayersPanel([], []);
       const url = location.origin + urls[active];
       document.getElementById('obsUrl').value = url;
       const dockInline = document.getElementById('dockUrlInline');
@@ -9760,49 +10970,85 @@ public class DonConnectWidgetServer
       if (size) size.textContent = t('recommendedObsSize') + ({ donation:'1280 x 720', history:'360 x 600 OBS Dock', goal:'1280 x 520', timer:'1280 x 420', credits:'1920 x 1080', leaderboard:'1280 x 720', filter:'1280 x 720' }[active] || '1280 x 720');
       const previewUrl = document.getElementById('previewUrl');
       if (previewUrl) previewUrl.value = url;
-      document.getElementById('frame').src = urls[active] + '?preview=1';
+      document.getElementById('frame').src = previewSrc(active);
       setTimeout(sendPreview, 250);
     }
+    function previewSrc(tab) { const mode = tab === 'goal' ? '&mode=goal' : tab === 'timer' ? '&mode=timer' : ''; return urls[tab] + '?preview=1' + mode + '&t=' + Date.now(); }
     function update(store, el, name) { const key = el.dataset[name]; const next = valueOf(el); if (next === null) return; store[key] = next; sync(`[data-${name}=""${key}""]`, store[key]); sendPreview(); }
-    function fillAll() { renderAlertMediaLibrary(); renderAlertRules(); renderServiceToggles(); populateSpeechVoices(); fill('donation', donation); fill('overlay', overlay); fill('credits', credits); fill('leaderboard', leaderboard); fill('filter', contentFilter); refreshGoalImageName(); hideBaseFontRows(); }
+    function fillAll() { renderAlertMediaLibrary(); renderAlertRules(); renderServiceToggles(); populateSpeechVoices(); fill('donation', donation); fill('overlay', overlay); fill('credits', credits); fill('leaderboard', leaderboard); fill('filter', contentFilter); renderCreditsSectionRows(); refreshGoalImageName(); hideBaseFontRows(); }
     function fill(name, store) { document.querySelectorAll(`[data-${name}]`).forEach(el => setValue(el, store[el.dataset[name]])); }
     function valueOf(el) { if (el.type === 'checkbox') return el.checked; return el.type === 'range' || el.type === 'number' ? numberValue(el) : el.value; }
-    function setValue(el, value) { if (el.type === 'checkbox') el.checked = value === true || value === 'true'; else { if (el.matches && el.matches('[data-font-select]')) ensureFontOption(el, value); el.value = value ?? ''; } }
-    function refreshGoalImageName() { const bar = document.getElementById('goalImageName'); if (bar) bar.textContent = overlay.GoalImageName || (overlay.GoalImageDataUrl ? 'Image selected' : ''); const decor = document.getElementById('decorImageName'); if (decor) decor.textContent = overlay.DecorImageName || (overlay.DecorImageDataUrl ? 'Image selected' : ''); }
+    function setValue(el, value) { if (el.type === 'checkbox') el.checked = value === true || value === 'true'; else { const next = el.matches && el.matches('[data-font-select]') ? cleanFontName(value) : value; if (el.matches && el.matches('[data-font-select]')) ensureFontOption(el, next); el.value = next ?? ''; } }
+    function refreshGoalImageName() { const bar = document.getElementById('goalImageName'); if (bar) bar.textContent = overlay.GoalImageName || (overlay.GoalImageDataUrl ? 'Image selected' : ''); const decorText = overlay.DecorImageName || (overlay.DecorImageDataUrl ? 'Image selected' : ''); const decor = document.getElementById('decorImageName'); if (decor) decor.textContent = decorText; const timerDecor = document.getElementById('timerDecorImageName'); if (timerDecor) timerDecor.textContent = decorText; }
     function numberValue(el) { const raw = String(el.value == null ? '' : el.value).trim().replace(',', '.'); if (!raw) return null; const parsed = Number(raw); if (!Number.isFinite(parsed)) return null; return el.step && el.step.includes('.') ? parsed : Math.round(parsed); }
     function sync(selector, value) { document.querySelectorAll(selector).forEach(el => setValue(el, value)); }
-    function sendPreview() { const frame = document.getElementById('frame'); if (!frame || !frame.contentWindow) return; if (active === 'donation' || active === 'history' || active === 'filter') frame.contentWindow.postMessage({ type:'settings', settings:donation }, location.origin); if (active === 'goal' || active === 'timer') frame.contentWindow.postMessage({ type:'overlay-settings', settings:overlay }, location.origin); if (active === 'credits') frame.contentWindow.postMessage({ type:'credits-settings', settings:credits }, location.origin); if (active === 'leaderboard') frame.contentWindow.postMessage({ type:'leaderboard-settings', settings:leaderboard }, location.origin); }
-    function directItem(selector, store, defaults, keys) { return Object.assign({ selector, store, defaults }, keys || {}); }
+    function durationInput(id) { const el = document.getElementById(id); const parsed = Number(String(el && el.value != null ? el.value : '0').trim().replace(',', '.')); return Number.isFinite(parsed) && parsed > 0 ? parsed : 0; }
+    function goalDeadlineDurationSeconds() { return Math.round(durationInput('goalDeadlineDays') * 86400 + durationInput('goalDeadlineHours') * 3600 + durationInput('goalDeadlineMinutes') * 60 + durationInput('goalDeadlineSeconds')); }
+    function parseEditorDeadline(value) { const raw = String(value || '').trim(); if (!raw) return null; const parsed = Date.parse(raw); return Number.isFinite(parsed) ? new Date(parsed) : null; }
+    function toDateTimeLocal(date) { const pad = value => String(value).padStart(2, '0'); return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + 'T' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds()); }
+    async function persistGoalDeadline(statusText) { try { overlay = await post('/donconnect/api/overlay-settings', overlay); fill('overlay', overlay); sendPreview(); setTimeout(enableDirectPreviewEditing, 80); showStatus(statusText); } catch (error) { sendPreview(); showStatus(error && error.message ? error.message : String(error)); } }
+    async function applyGoalDeadlineDuration(extendCurrent) { const seconds = goalDeadlineDurationSeconds(); if (seconds <= 0) { showStatus(t('goalDeadlineEmptyDuration')); return; } captureUndo('overlay'); const now = new Date(); let base = extendCurrent ? parseEditorDeadline(overlay.GoalDeadlineEndsAt) : now; if (!base || base.getTime() <= now.getTime()) base = now; const end = new Date(base.getTime() + seconds * 1000); overlay.GoalDeadlineEndsAt = toDateTimeLocal(end); overlay.GoalDeadlineEnabled = true; sync('[data-overlay=GoalDeadlineEndsAt]', overlay.GoalDeadlineEndsAt); sync('[data-overlay=GoalDeadlineEnabled]', overlay.GoalDeadlineEnabled); await persistGoalDeadline(t('goalDeadlineUpdated')); }
+    async function stopGoalDeadline() { captureUndo('overlay'); overlay.GoalDeadlineEnabled = false; sync('[data-overlay=GoalDeadlineEnabled]', false); await persistGoalDeadline(t('goalDeadlineStopped')); }
+    function previewOverlaySettings() { if (active !== 'goal') return overlay; const copy = Object.assign({}, overlay); copy.Mode = 'goal'; copy.TimerEnabled = false; copy.TimerShowConversion = false; return copy; }
+    function sendPreview() { const frame = document.getElementById('frame'); if (!frame || !frame.contentWindow) return; if (active === 'donation' || active === 'history' || active === 'filter') frame.contentWindow.postMessage({ type:'settings', settings:donation }, location.origin); if (active === 'goal' || active === 'timer') frame.contentWindow.postMessage({ type:'overlay-settings', settings:previewOverlaySettings() }, location.origin); if (active === 'credits') frame.contentWindow.postMessage({ type:'credits-settings', settings:credits }, location.origin); if (active === 'leaderboard') frame.contentWindow.postMessage({ type:'leaderboard-settings', settings:leaderboard }, location.origin); const refresh = () => { try { if (typeof frame.contentWindow.__dcDirectRefresh === 'function') frame.contentWindow.__dcDirectRefresh(); } catch {} }; requestAnimationFrame(refresh); setTimeout(refresh, 40); setTimeout(refresh, 140); }
+    const layerDefaultsByEditor = {
+      donation:['background','decor','media','donor','amount','message','platform'],
+      goal:['background','decor','goalBar','goalImage','goalText','goalMeta','goalDeadline','services','last','title'],
+      timer:['background','decor','title','timerBlock','timerTitle','timerSubtitle','timerValue','timerMeta','timerConversion','services']
+    };
+    function directItem(selector, store, defaults, keys) { return Object.assign({ selector, store, defaults, hideKeys:[], layerId:'', labelKey:'' }, keys || {}); }
     function directEditMappings() {
       if (active === 'donation') return [
-        directItem('#donor', donation, donationDefaults, { xKey:'DonorX', yKey:'DonorY', widthKey:'DonorWidth', heightKey:'DonorHeight', rotationKey:'DonorRotation' }),
-        directItem('#amount', donation, donationDefaults, { xKey:'AmountX', yKey:'AmountY', widthKey:'AmountWidth', heightKey:'AmountHeight', rotationKey:'AmountRotation' }),
-        directItem('#message', donation, donationDefaults, { xKey:'MessageX', yKey:'MessageY', widthKey:'MessageWidth', heightKey:'MessageHeight', rotationKey:'MessageRotation' }),
-        directItem('#platform', donation, donationDefaults, { xKey:'PlatformX', yKey:'PlatformY', widthKey:'PlatformWidth', heightKey:'PlatformHeight', rotationKey:'PlatformRotation' }),
-        directItem('#media', donation, donationDefaults, { xKey:'MediaX', yKey:'MediaY', widthKey:'MediaWidth', heightKey:'MediaHeight', rotationKey:'MediaRotation' })
+        directItem('#widget', donation, donationDefaults, { layerId:'background', labelKey:'layerBackground', sectionSelector:'[data-pane=donation] fieldset:nth-of-type(2)', widthKey:'Width', heightKey:'Height', hideKeys:['ShowBackground'] }),
+        directItem('#decor', donation, donationDefaults, { layerId:'decor', labelKey:'layerDecor', section:'media', xKey:'DecorImageX', yKey:'DecorImageY', widthKey:'DecorImageWidth', heightKey:'DecorImageHeight', rotationKey:'DecorImageRotation', hideKeys:['ShowDecorImage'] }),
+        directItem('#media', donation, donationDefaults, { layerId:'media', labelKey:'layerMedia', section:'media', xKey:'MediaX', yKey:'MediaY', widthKey:'MediaWidth', heightKey:'MediaHeight', rotationKey:'MediaRotation', hideKeys:['ShowMedia'] }),
+        directItem('#donor', donation, donationDefaults, { layerId:'donor', labelKey:'layerDonor', section:'donor', xKey:'DonorX', yKey:'DonorY', widthKey:'DonorWidth', heightKey:'DonorHeight', fontSizeKey:'DonorFontSize', rotationKey:'DonorRotation', hideKeys:['ShowDonor'] }),
+        directItem('#amount', donation, donationDefaults, { layerId:'amount', labelKey:'layerAmount', section:'amount', xKey:'AmountX', yKey:'AmountY', widthKey:'AmountWidth', heightKey:'AmountHeight', fontSizeKey:'AmountFontSize', rotationKey:'AmountRotation', hideKeys:['ShowAmount'] }),
+        directItem('#message', donation, donationDefaults, { layerId:'message', labelKey:'layerMessage', section:'message', xKey:'MessageX', yKey:'MessageY', widthKey:'MessageWidth', heightKey:'MessageHeight', fontSizeKey:'MessageFontSize', rotationKey:'MessageRotation', hideKeys:['ShowMessage'] }),
+        directItem('#platform', donation, donationDefaults, { layerId:'platform', labelKey:'layerPlatform', section:'platform', xKey:'PlatformX', yKey:'PlatformY', widthKey:'PlatformWidth', heightKey:'PlatformHeight', fontSizeKey:'PlatformFontSize', rotationKey:'PlatformRotation', hideKeys:['ShowPlatform'] })
       ];
       if (active === 'goal') return [
-        directItem('#title', overlay, overlayDefaults, { xKey:'TitleX', yKey:'TitleY', widthKey:'TitleWidth', heightKey:'TitleHeight', rotationKey:'TitleRotation' }),
-        directItem('#goalText', overlay, overlayDefaults, { xKey:'GoalTextOffsetX', yKey:'GoalTextOffsetY', widthKey:'GoalTextWidth', heightKey:'GoalTextHeight', rotationKey:'GoalTextRotation' }),
-        directItem('#goalBar', overlay, overlayDefaults, { xKey:'GoalBarX', yKey:'GoalBarY', widthKey:overlay.GoalFillDirection === 'vertical' ? 'GoalBarHeight' : 'GoalBarLength', heightKey:overlay.GoalFillDirection === 'vertical' ? 'GoalBarLength' : 'GoalBarHeight', rotationKey:'GoalBarRotation' }),
-        directItem('#goalImage', overlay, overlayDefaults, { xKey:'GoalImageX', yKey:'GoalImageY', widthKey:'GoalImageWidth', heightKey:'GoalImageHeight', rotationKey:'GoalImageRotation' }),
-        directItem('#decorImage', overlay, overlayDefaults, { xKey:'DecorImageX', yKey:'DecorImageY', widthKey:'DecorImageWidth', heightKey:'DecorImageHeight', rotationKey:'DecorImageRotation' }),
-        directItem('#goalMeta', overlay, overlayDefaults, { xKey:'GoalMetaX', yKey:'GoalMetaY', widthKey:'GoalMetaWidth', heightKey:'GoalMetaHeight', rotationKey:'GoalMetaRotation' }),
-        directItem('#services', overlay, overlayDefaults, { xKey:'ServicesX', yKey:'ServicesY', widthKey:'ServicesWidth', heightKey:'ServicesHeight', rotationKey:'ServicesRotation' }),
-        directItem('#last', overlay, overlayDefaults, { xKey:'LastDonationX', yKey:'LastDonationY', widthKey:'LastDonationWidth', heightKey:'LastDonationHeight', rotationKey:'LastDonationRotation' })
+        directItem('.panel', overlay, overlayDefaults, { layerId:'background', labelKey:'layerBackground', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(4)', widthKey:'Width', heightKey:'PanelHeight', hideKeys:['ShowPanelBackground'] }),
+        directItem('#decorImage', overlay, overlayDefaults, { layerId:'decor', labelKey:'layerDecor', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(6)', xKey:'DecorImageX', yKey:'DecorImageY', widthKey:'DecorImageWidth', heightKey:'DecorImageHeight', rotationKey:'DecorImageRotation', hideKeys:['ShowDecorImage'] }),
+        directItem('#goalBar', overlay, overlayDefaults, { layerId:'goalBar', labelKey:'layerGoalBar', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(4)', xKey:'GoalBarX', yKey:'GoalBarY', widthKey:overlay.GoalFillDirection === 'vertical' ? 'GoalBarHeight' : 'GoalBarLength', heightKey:overlay.GoalFillDirection === 'vertical' ? 'GoalBarLength' : 'GoalBarHeight', rotationKey:'GoalBarRotation', hideKeys:['ShowGoalBar'] }),
+        directItem('#goalImage', overlay, overlayDefaults, { layerId:'goalImage', labelKey:'layerGoalImage', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(5)', xKey:'GoalImageX', yKey:'GoalImageY', widthKey:'GoalImageWidth', heightKey:'GoalImageHeight', rotationKey:'GoalImageRotation', hideKeys:['ShowGoalImage'] }),
+        directItem('#goalText', overlay, overlayDefaults, { layerId:'goalText', labelKey:'layerGoalText', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(3)', xKey:'GoalTextOffsetX', yKey:'GoalTextOffsetY', widthKey:'GoalTextWidth', heightKey:'GoalTextHeight', fontSizeKeys:['TitleSize','ValueSize'], rotationKey:'GoalTextRotation', hideKeys:['ShowGoalText'] }),
+        directItem('#goalMeta', overlay, overlayDefaults, { layerId:'goalMeta', labelKey:'layerGoalMeta', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(3)', xKey:'GoalMetaX', yKey:'GoalMetaY', widthKey:'GoalMetaWidth', heightKey:'GoalMetaHeight', rotationKey:'GoalMetaRotation', hideKeys:['ShowGoalMeta'] }),
+        directItem('#goalDeadline', overlay, overlayDefaults, { layerId:'goalDeadline', labelKey:'layerGoalDeadline', section:'goalDeadline', xKey:'GoalDeadlineX', yKey:'GoalDeadlineY', widthKey:'GoalDeadlineWidth', heightKey:'GoalDeadlineHeight', fontSizeKey:'GoalDeadlineFontSize', rotationKey:'GoalDeadlineRotation', hideKeys:['GoalDeadlineEnabled'] }),
+        directItem('#services', overlay, overlayDefaults, { layerId:'services', labelKey:'layerServices', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(8)', xKey:'ServicesX', yKey:'ServicesY', widthKey:'ServicesWidth', heightKey:'ServicesHeight', fontSizeKey:'ServicesFontSize', rotationKey:'ServicesRotation', hideKeys:['ShowServices'] }),
+        directItem('#last', overlay, overlayDefaults, { layerId:'last', labelKey:'layerLastDonation', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(7)', xKey:'LastDonationX', yKey:'LastDonationY', widthKey:'LastDonationWidth', heightKey:'LastDonationHeight', fontSizeKey:'LastDonationFontSize', rotationKey:'LastDonationRotation', hideKeys:['ShowLastDonor','ShowLastAmount','ShowLastPlatform'] }),
+        directItem('#title', overlay, overlayDefaults, { layerId:'title', labelKey:'layerTitle', sectionSelector:'[data-pane=goal] fieldset:nth-of-type(2)', xKey:'TitleX', yKey:'TitleY', widthKey:'TitleWidth', heightKey:'TitleHeight', rotationKey:'TitleRotation' })
       ];
       if (active === 'timer') return [
-        directItem('#title', overlay, overlayDefaults, { xKey:'TitleX', yKey:'TitleY', widthKey:'TitleWidth', heightKey:'TitleHeight', rotationKey:'TitleRotation' }),
-        directItem('#timerBlock', overlay, overlayDefaults, { xKey:'TimerX', yKey:'TimerY', widthKey:'TimerWidth', heightKey:'TimerHeight', rotationKey:'TimerRotation' }),
-        directItem('#timerTitle', overlay, overlayDefaults, { xKey:'TimerTitleX', yKey:'TimerTitleY', widthKey:'TimerTitleWidth', heightKey:'TimerTitleHeight', rotationKey:'TimerTitleRotation' }),
-        directItem('#timerSubtitle', overlay, overlayDefaults, { xKey:'TimerSubtitleX', yKey:'TimerSubtitleY', widthKey:'TimerSubtitleWidth', heightKey:'TimerSubtitleHeight', rotationKey:'TimerSubtitleRotation' }),
-        directItem('#timerValue', overlay, overlayDefaults, { xKey:'TimerValueX', yKey:'TimerValueY', widthKey:'TimerValueWidth', heightKey:'TimerValueHeight', rotationKey:'TimerValueRotation' }),
-        directItem('#timerMeta', overlay, overlayDefaults, { xKey:'TimerMetaX', yKey:'TimerMetaY', widthKey:'TimerMetaWidth', heightKey:'TimerMetaHeight', rotationKey:'TimerMetaRotation' }),
-        directItem('#timerConversion', overlay, overlayDefaults, { xKey:'TimerConversionX', yKey:'TimerConversionY', widthKey:'TimerConversionWidth', heightKey:'TimerConversionHeight', rotationKey:'TimerConversionRotation' }),
-        directItem('#services', overlay, overlayDefaults, { xKey:'ServicesX', yKey:'ServicesY', widthKey:'ServicesWidth', heightKey:'ServicesHeight', rotationKey:'ServicesRotation' })
+        directItem('.panel', overlay, overlayDefaults, { layerId:'background', labelKey:'layerBackground', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(4)', widthKey:'Width', heightKey:'PanelHeight', hideKeys:['ShowPanelBackground'] }),
+        directItem('#decorImage', overlay, overlayDefaults, { layerId:'decor', labelKey:'layerDecor', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(5)', xKey:'TimerDecorImageX', yKey:'TimerDecorImageY', widthKey:'TimerDecorImageWidth', heightKey:'TimerDecorImageHeight', rotationKey:'TimerDecorImageRotation', hideKeys:['ShowTimerDecorImage'] }),
+        directItem('#title', overlay, overlayDefaults, { layerId:'title', labelKey:'layerTitle', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(2)', xKey:'TimerHeaderX', yKey:'TimerHeaderY', widthKey:'TimerHeaderWidth', heightKey:'TimerHeaderHeight', fontSizeKey:'TitleSize', rotationKey:'TimerHeaderRotation' }),
+        directItem('#timerBlock', overlay, overlayDefaults, { layerId:'timerBlock', labelKey:'layerTimerBlock', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(4)', xKey:'TimerX', yKey:'TimerY', widthKey:'TimerWidth', heightKey:'TimerHeight', rotationKey:'TimerRotation', hideKeys:['TimerEnabled'] }),
+        directItem('#timerTitle', overlay, overlayDefaults, { layerId:'timerTitle', labelKey:'layerTimerTitle', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(2)', xKey:'TimerTitleX', yKey:'TimerTitleY', widthKey:'TimerTitleWidth', heightKey:'TimerTitleHeight', fontSizeKey:'LabelSize', rotationKey:'TimerTitleRotation', hideKeys:['TimerEnabled'] }),
+        directItem('#timerSubtitle', overlay, overlayDefaults, { layerId:'timerSubtitle', labelKey:'layerTimerSubtitle', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(2)', xKey:'TimerSubtitleX', yKey:'TimerSubtitleY', widthKey:'TimerSubtitleWidth', heightKey:'TimerSubtitleHeight', fontSizeKey:'MetaSize', rotationKey:'TimerSubtitleRotation', hideKeys:['TimerEnabled'] }),
+        directItem('#timerValue', overlay, overlayDefaults, { layerId:'timerValue', labelKey:'layerTimerValue', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(4)', xKey:'TimerValueX', yKey:'TimerValueY', widthKey:'TimerValueWidth', heightKey:'TimerValueHeight', fontSizeKey:'ValueSize', rotationKey:'TimerValueRotation', hideKeys:['TimerEnabled'] }),
+        directItem('#timerMeta', overlay, overlayDefaults, { layerId:'timerMeta', labelKey:'layerTimerMeta', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(4)', xKey:'TimerMetaX', yKey:'TimerMetaY', widthKey:'TimerMetaWidth', heightKey:'TimerMetaHeight', fontSizeKey:'MetaSize', rotationKey:'TimerMetaRotation', hideKeys:['TimerEnabled'] }),
+        directItem('#timerConversion', overlay, overlayDefaults, { layerId:'timerConversion', labelKey:'layerTimerConversion', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(3)', xKey:'TimerConversionX', yKey:'TimerConversionY', widthKey:'TimerConversionWidth', heightKey:'TimerConversionHeight', fontSizeKey:'MetaSize', rotationKey:'TimerConversionRotation', hideKeys:['TimerEnabled','TimerShowConversion'] }),
+        directItem('#services', overlay, overlayDefaults, { layerId:'services', labelKey:'layerServices', sectionSelector:'[data-pane=timer] fieldset:nth-of-type(3)', xKey:'ServicesX', yKey:'ServicesY', widthKey:'ServicesWidth', heightKey:'ServicesHeight', fontSizeKey:'ServicesFontSize', rotationKey:'ServicesRotation', hideKeys:['TimerEnabled','TimerShowServices'] })
       ];
       return [];
     }
+    function layerOrderKey() { if (active === 'donation') return 'LayerOrder'; if (active === 'goal') return 'GoalLayerOrder'; if (active === 'timer') return 'TimerLayerOrder'; return ''; }
+    function layerStore() { return active === 'donation' ? donation : overlay; }
+    function defaultLayerOrder() { return layerDefaultsByEditor[active] || []; }
+    function normalizeLayerOrder(value, mappings) { const ids = (mappings || []).map(item => item.layerId).filter(Boolean); const allowed = new Set(ids.length ? ids : defaultLayerOrder()); const result = []; (Array.isArray(value) ? value : []).forEach(id => { id = String(id || ''); if (allowed.has(id) && !result.includes(id)) result.push(id); }); (ids.length ? ids : defaultLayerOrder()).forEach(id => { if (!result.includes(id)) result.push(id); }); return result; }
+    function currentLayerOrder(mappings) { const key = layerOrderKey(); const store = layerStore(); return key && store ? normalizeLayerOrder(store[key], mappings) : []; }
+    function setLayerOrder(order, mappings) { const key = layerOrderKey(); const store = layerStore(); if (!key || !store) return; store[key] = normalizeLayerOrder(order, mappings); }
+    function orderedLayerItems(mappings) { const byId = new Map(); (mappings || []).forEach(item => { if (item.layerId && !byId.has(item.layerId)) byId.set(item.layerId, item); }); return currentLayerOrder(mappings).map(id => byId.get(id)).filter(Boolean); }
+    function layerText(value) { return String(value || '').replace(/[&<>'\x22]/g, ch => { const c = ch.charCodeAt(0); if (c === 38) return '&amp;'; if (c === 60) return '&lt;'; if (c === 62) return '&gt;'; if (c === 39) return '&#39;'; return '&quot;'; }); }
+    function selectDirectLayer(layerId) { const frame = document.getElementById('frame'); try { if (frame && frame.contentWindow && typeof frame.contentWindow.__dcSelectDirectLayer === 'function') frame.contentWindow.__dcSelectDirectLayer(layerId); } catch {} }
+    function persistLayerOrder(displayOrder, mappings, selectedLayerId) { captureUndo(active === 'donation' ? 'donation' : 'overlay'); setLayerOrder(displayOrder.slice().reverse(), mappings); renderLayersPanel(mappings, selectedLayerId ? [{ layerId:selectedLayerId }] : []); sendPreview(); if (selectedLayerId) setTimeout(() => selectDirectLayer(selectedLayerId), 80); }
+    function moveLayerBefore(dragId, targetId, mappings) { if (!dragId || !targetId || dragId === targetId) return; const display = orderedLayerItems(mappings).map(item => item.layerId).reverse(); const from = display.indexOf(dragId), to = display.indexOf(targetId); if (from < 0 || to < 0) return; display.splice(from, 1); display.splice(to, 0, dragId); persistLayerOrder(display, mappings, dragId); }
+    function moveLayerByStep(layerId, step, mappings) { if (!layerId || !step) return; const display = orderedLayerItems(mappings).map(item => item.layerId).reverse(); const index = display.indexOf(layerId); if (index < 0) return; const next = Math.max(0, Math.min(display.length - 1, index + step)); if (next === index) return; display.splice(index, 1); display.splice(next, 0, layerId); persistLayerOrder(display, mappings, layerId); }
+    function resetLayerOrder(mappings) { captureUndo(active === 'donation' ? 'donation' : 'overlay'); setLayerOrder(defaultLayerOrder(), mappings); renderLayersPanel(mappings, []); sendPreview(); }
+    function renderLayersPanel(mappings, selectedItems) { const panel = document.getElementById('layersPanel'), list = document.getElementById('layersList'), reset = document.getElementById('layersReset'); if (!panel || !list) return; if (!['donation','goal','timer'].includes(active) || !mappings || !mappings.length) { panel.classList.add('hidden'); list.innerHTML = ''; return; } const items = orderedLayerItems(mappings); if (!items.length) { panel.classList.add('hidden'); list.innerHTML = ''; return; } const selected = new Set((selectedItems || []).map(item => item.layerId).filter(Boolean)); const displayItems = items.slice().reverse(); panel.classList.remove('hidden'); if (reset) { reset.title = t('resetLayers'); reset.onclick = () => resetLayerOrder(mappings); } list.innerHTML = displayItems.map((item, index) => `<div class=""layer-item ${selected.has(item.layerId) ? 'active' : ''}"" draggable=""true"" data-layer-id=""${layerText(item.layerId)}""><span class=""layer-main"">${layerText(t(item.labelKey) || item.layerId)}</span><span class=""layer-actions""><button type=""button"" class=""layer-action"" data-layer-up=""${layerText(item.layerId)}"" title=""${layerText(t('moveLayerUp'))}"" ${index === 0 ? 'disabled' : ''}>▲</button><button type=""button"" class=""layer-action"" data-layer-down=""${layerText(item.layerId)}"" title=""${layerText(t('moveLayerDown'))}"" ${index === displayItems.length - 1 ? 'disabled' : ''}>▼</button></span><span class=""layer-handle"">↕</span></div>`).join(''); let dragging = ''; const clearDrop = () => list.querySelectorAll('.drop-target').forEach(node => node.classList.remove('drop-target')); list.querySelectorAll('[data-layer-id]').forEach(row => { row.addEventListener('click', event => { if (event.target.closest('button')) return; selectDirectLayer(row.dataset.layerId); }); row.addEventListener('dragstart', event => { dragging = row.dataset.layerId; row.classList.add('dragging'); if (event.dataTransfer) { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', dragging); } }); row.addEventListener('dragend', () => { row.classList.remove('dragging'); clearDrop(); }); row.addEventListener('dragover', event => { event.preventDefault(); clearDrop(); row.classList.add('drop-target'); if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'; }); row.addEventListener('dragleave', event => { if (!row.contains(event.relatedTarget)) row.classList.remove('drop-target'); }); row.addEventListener('drop', event => { event.preventDefault(); clearDrop(); moveLayerBefore((event.dataTransfer && event.dataTransfer.getData('text/plain')) || dragging, row.dataset.layerId, mappings); }); }); list.querySelectorAll('[data-layer-up]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); moveLayerByStep(button.dataset.layerUp, -1, mappings); })); list.querySelectorAll('[data-layer-down]').forEach(button => button.addEventListener('click', event => { event.stopPropagation(); moveLayerByStep(button.dataset.layerDown, 1, mappings); })); }
+    function directSections() { return document.querySelectorAll('[data-direct-section]'); }
+    function openDirectSection(item) { directSections().forEach(section => section.classList.add('collapsed')); if (!item) return; const section = item.section ? document.querySelector(`[data-direct-section=${item.section}]`) : item.sectionSelector ? document.querySelector(item.sectionSelector) : null; if (!section) return; section.classList.remove('collapsed'); section.scrollIntoView({ block:'nearest', behavior:'smooth' }); }
     function updatePreviewGrid() {
       const frame = document.getElementById('frame'); let doc;
       try { doc = frame && frame.contentDocument; } catch { return; }
@@ -9810,15 +11056,20 @@ public class DonConnectWidgetServer
       const enabled = !!(document.getElementById('gridToggle') && document.getElementById('gridToggle').checked);
       doc.body.style.backgroundImage = enabled ? 'linear-gradient(rgba(53,208,127,.16) 1px, transparent 1px), linear-gradient(90deg, rgba(53,208,127,.16) 1px, transparent 1px), linear-gradient(rgba(53,208,127,.28) 1px, transparent 1px), linear-gradient(90deg, rgba(53,208,127,.28) 1px, transparent 1px)' : '';
       doc.body.style.backgroundSize = enabled ? '20px 20px, 20px 20px, 100px 100px, 100px 100px' : '';
+      doc.body.style.backgroundPosition = enabled ? '50% 50%, 50% 50%, 50% 50%, 50% 50%' : '';
     }
     function enableDirectPreviewEditing() {
       const frame = document.getElementById('frame'); let doc;
       try { doc = frame && frame.contentDocument; } catch { return; }
       if (!doc || !doc.body) return;
+      const win = frame.contentWindow;
+      if (win && typeof win.__dcDirectCleanup === 'function') win.__dcDirectCleanup();
       updatePreviewGrid();
       const old = doc.getElementById('dcDirectEditor'); if (old) old.remove();
       const oldGuides = doc.getElementById('dcDirectGuides'); if (oldGuides) oldGuides.remove();
+      const oldMarquee = doc.getElementById('dcDirectMarquee'); if (oldMarquee) oldMarquee.remove();
       const mappings = directEditMappings();
+      renderLayersPanel(mappings, []);
       if (!mappings.length) return;
       const guides = doc.createElement('div'); guides.id = 'dcDirectGuides'; guides.style.cssText = 'position:fixed;inset:0;z-index:2147483644;pointer-events:none;display:none;';
       guides.innerHTML = '<i data-guide=""canvas-x""></i><i data-guide=""canvas-y""></i><i data-guide=""element-x""></i><i data-guide=""element-y""></i>';
@@ -9830,56 +11081,118 @@ public class DonConnectWidgetServer
       doc.body.appendChild(guides);
       const box = doc.createElement('div'); box.id = 'dcDirectEditor'; box.style.cssText = 'position:fixed;display:none;z-index:2147483646;border:2px solid #35d07f;box-shadow:0 0 0 1px rgba(0,0,0,.65);pointer-events:none;';
       const handles = {};
-      const handlePositions = { n:'left:50%;top:-7px;transform:translateX(-50%);cursor:ns-resize;', s:'left:50%;bottom:-7px;transform:translateX(-50%);cursor:ns-resize;', e:'right:-7px;top:50%;transform:translateY(-50%);cursor:ew-resize;', w:'left:-7px;top:50%;transform:translateY(-50%);cursor:ew-resize;', ne:'right:-7px;top:-7px;cursor:nesw-resize;', nw:'left:-7px;top:-7px;cursor:nwse-resize;', se:'right:-7px;bottom:-7px;cursor:nwse-resize;', sw:'left:-7px;bottom:-7px;cursor:nesw-resize;' };
-      Object.keys(handlePositions).forEach(direction => { const handle = doc.createElement('div'); handle.dataset.resize = direction; handle.style.cssText = 'position:absolute;width:14px;height:14px;border:2px solid #fff;background:#1f7a4d;border-radius:2px;pointer-events:auto;' + handlePositions[direction]; box.appendChild(handle); handles[direction] = handle; });
-      const rotate = doc.createElement('button'); rotate.type = 'button'; rotate.title = 'Rotate'; rotate.innerHTML = '&#8635;'; rotate.style.cssText = 'position:absolute;left:50%;top:-38px;transform:translateX(-50%);width:28px;height:28px;border:2px solid #fff;border-radius:50%;padding:0;background:#1f7a4d;color:#fff;font:900 17px/24px Segoe UI;cursor:grab;pointer-events:auto;'; box.appendChild(rotate);
-      const reset = doc.createElement('button'); reset.type = 'button'; reset.title = 'Reset element'; reset.innerHTML = '&#8634;'; reset.style.cssText = 'position:absolute;right:-2px;top:-34px;width:28px;height:26px;border:1px solid #fff;border-radius:5px;padding:0;background:#8b1e2d;color:#fff;font:900 16px/22px Segoe UI;cursor:pointer;pointer-events:auto;'; box.appendChild(reset);
+      const handlePositions = { n:'left:50%;top:-9px;transform:translateX(-50%);cursor:ns-resize;', s:'left:50%;bottom:-9px;transform:translateX(-50%);cursor:ns-resize;', e:'right:-9px;top:50%;transform:translateY(-50%);cursor:ew-resize;', w:'left:-9px;top:50%;transform:translateY(-50%);cursor:ew-resize;', ne:'right:-9px;top:-9px;cursor:nesw-resize;', nw:'left:-9px;top:-9px;cursor:nwse-resize;', se:'right:-9px;bottom:-9px;cursor:nwse-resize;', sw:'left:-9px;bottom:-9px;cursor:nesw-resize;' };
+      Object.keys(handlePositions).forEach(direction => { const handle = doc.createElement('div'); handle.dataset.resize = direction; handle.style.cssText = 'position:absolute;width:18px;height:18px;border:2px solid #fff;background:#1f7a4d;border-radius:3px;pointer-events:auto;touch-action:none;' + handlePositions[direction]; box.appendChild(handle); handles[direction] = handle; });
+      const toolbar = doc.createElement('div'); toolbar.style.cssText = 'position:absolute;left:50%;top:-42px;transform:translateX(-50%);display:flex;gap:5px;pointer-events:auto;white-space:nowrap;'; box.appendChild(toolbar);
+      const toolButton = (title, text, color) => { const button = doc.createElement('button'); button.type = 'button'; button.title = title; button.textContent = text; button.style.cssText = 'min-width:30px;height:30px;border:1px solid #fff;border-radius:5px;padding:0 7px;background:' + color + ';color:#fff;font:900 14px/26px Segoe UI;cursor:pointer;pointer-events:auto;'; toolbar.appendChild(button); return button; };
+      const rotate = toolButton(t('rotateElement'), '\u21bb', '#1f7a4d'); rotate.style.cursor = 'grab';
+      const center = toolButton(t('centerElement'), '\u2295', '#255f85');
+      const reset = toolButton(t('resetElement'), '\u21ba', '#6b4f1d');
+      const disable = toolButton(t('disableElement'), '\u2715', '#8b1e2d');
       doc.body.appendChild(box);
-      let selected = null;
+      const marquee = doc.createElement('div'); marquee.id = 'dcDirectMarquee'; marquee.style.cssText = 'position:fixed;display:none;z-index:2147483645;border:1px solid #35d07f;background:rgba(53,208,127,.12);pointer-events:none;'; doc.body.appendChild(marquee);
+      let selectedItems = [];
       let commitPending = false;
       const commit = () => { if (commitPending) return; commitPending = true; requestAnimationFrame(() => { commitPending = false; if (active === 'donation') fill('donation', donation); else fill('overlay', overlay); sendPreview(); requestAnimationFrame(refreshBox); }); };
+      const visible = item => item && item.element && item.element.isConnected && !item.element.classList.contains('hidden') && getComputedStyle(item.element).display !== 'none' && getComputedStyle(item.element).visibility !== 'hidden';
+      const unionRect = items => { const rects = items.filter(visible).map(item => item.element.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0); if (!rects.length) return null; const left = Math.min(...rects.map(rect => rect.left)), top = Math.min(...rects.map(rect => rect.top)), right = Math.max(...rects.map(rect => rect.right)), bottom = Math.max(...rects.map(rect => rect.bottom)); return { left, top, right, bottom, width:right-left, height:bottom-top }; };
+      const setSelection = items => { let next = [...new Set((items || []).filter(visible))]; if (next.length > 1) next = next.filter(item => item.layerId !== 'background'); selectedItems = next; openDirectSection(selectedItems.length === 1 ? selectedItems[0] : null); refreshBox(); renderLayersPanel(mappings, selectedItems); };
+      const fontSizeKeys = item => [...new Set([item && item.fontSizeKey].concat(item && Array.isArray(item.fontSizeKeys) ? item.fontSizeKeys : []).filter(Boolean))];
+      const canResizeItem = item => item && (item.widthKey || item.heightKey || fontSizeKeys(item).length);
       const refreshBox = () => {
-        if (!selected || !selected.element.isConnected || selected.element.classList.contains('hidden')) { box.style.display = 'none'; guides.style.display = 'none'; return; }
-        const rect = selected.element.getBoundingClientRect();
-        if (rect.width < 1 || rect.height < 1) { box.style.display = 'none'; guides.style.display = 'none'; return; }
+        selectedItems = selectedItems.filter(visible); const rect = unionRect(selectedItems);
+        if (!rect) { box.style.display = 'none'; guides.style.display = 'none'; return; }
         box.style.display = 'block'; guides.style.display = 'block'; box.style.left = rect.left + 'px'; box.style.top = rect.top + 'px'; box.style.width = rect.width + 'px'; box.style.height = rect.height + 'px';
         guides.querySelector('[data-guide=element-x]').style.left = (rect.left + rect.width / 2) + 'px'; guides.querySelector('[data-guide=element-y]').style.top = (rect.top + rect.height / 2) + 'px';
-        Object.values(handles).forEach(handle => handle.style.display = selected.widthKey || selected.heightKey ? 'block' : 'none'); rotate.style.display = selected.rotationKey ? 'block' : 'none';
+        const selected = selectedItems.length === 1 ? selectedItems[0] : null; Object.values(handles).forEach(handle => handle.style.display = selected && canResizeItem(selected) ? 'block' : 'none'); rotate.style.display = selected && selected.rotationKey ? 'block' : 'none'; disable.style.display = selectedItems.some(item => item.hideKeys && item.hideKeys.length) ? 'block' : 'none';
+      };
+      const snapDelta = (rect, dx, dy) => { const enabled = !!(document.getElementById('snapToggle') && document.getElementById('snapToggle').checked); if (!enabled || !rect) return { dx, dy }; const threshold = 9, centerX = rect.left + rect.width / 2 + dx, centerY = rect.top + rect.height / 2 + dy, canvasX = doc.documentElement.clientWidth / 2, canvasY = doc.documentElement.clientHeight / 2; if (Math.abs(centerX - canvasX) <= threshold) dx += canvasX - centerX; if (Math.abs(centerY - canvasY) <= threshold) dy += canvasY - centerY; return { dx, dy }; };
+      const canMove = item => item && (item.xKey || item.yKey);
+      const movableSelection = () => selectedItems.filter(item => canMove(item) && !selectedItems.some(parent => parent !== item && canMove(parent) && parent.element && item.element && parent.element.contains(item.element)));
+      const moveSelection = (dx, dy, bases) => { movableSelection().forEach(item => { const base = bases.get(item); if (!base) return; if (item.xKey) item.store[item.xKey] = Math.round(base.x + dx); if (item.yKey) item.store[item.yKey] = Math.round(base.y + dy); }); commit(); };
+      const centerOf = item => { const rect = item.element.getBoundingClientRect(); return { x:rect.left + rect.width / 2, y:rect.top + rect.height / 2 }; };
+      const captureResizeAnchors = excludedItems => {
+        const excluded = new Set(excludedItems || []);
+        return mappings.filter(item => !excluded.has(item) && item.layerId !== 'background' && visible(item) && canMove(item)).map(item => {
+          const center = centerOf(item);
+          return { item, x:center.x, y:center.y };
+        });
+      };
+      let restoreAnchorsToken = 0;
+      const restoreAnchorsAfterResize = anchors => {
+        if (!anchors || !anchors.length) return;
+        const token = ++restoreAnchorsToken;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          if (token !== restoreAnchorsToken) return;
+          let changed = false;
+          anchors.forEach(anchor => {
+            const item = anchor.item;
+            if (!visible(item)) return;
+            const center = centerOf(item);
+            const dx = anchor.x - center.x, dy = anchor.y - center.y;
+            if (item.xKey && Math.abs(dx) >= .5) { item.store[item.xKey] = Math.round(Number(item.store[item.xKey] || 0) + dx); changed = true; }
+            if (item.yKey && Math.abs(dy) >= .5) { item.store[item.yKey] = Math.round(Number(item.store[item.yKey] || 0) + dy); changed = true; }
+          });
+          if (!changed) return;
+          if (active === 'donation') fill('donation', donation); else fill('overlay', overlay);
+          sendPreview();
+          requestAnimationFrame(refreshBox);
+        }));
       };
       mappings.forEach(item => {
         const element = doc.querySelector(item.selector); if (!element) return;
-        item.element = element; element.style.pointerEvents = 'auto'; element.style.cursor = 'move'; element.title = 'Drag to move. Use the frame to resize or rotate.';
-        element.addEventListener('pointerdown', event => {
-          if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); selected = item; refreshBox();
-          const startX = event.clientX, startY = event.clientY, baseX = Number(item.store[item.xKey] || 0), baseY = Number(item.store[item.yKey] || 0);
-          const move = moveEvent => { item.store[item.xKey] = Math.round(baseX + moveEvent.clientX - startX); item.store[item.yKey] = Math.round(baseY + moveEvent.clientY - startY); commit(); };
+        item.element = element; element.style.pointerEvents = 'auto'; element.style.touchAction = 'none'; element.style.cursor = 'move'; element.title = 'Drag to move. Use the frame to resize or rotate.';
+        element.onpointerdown = event => {
+          if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
+          if (win) { try { win.focus(); } catch {} }
+          if (event.ctrlKey || event.metaKey) { const wasSelected = selectedItems.includes(item); setSelection(wasSelected ? selectedItems.filter(value => value !== item) : [...selectedItems, item]); if (wasSelected) return; } else if (!selectedItems.includes(item)) setSelection([item]);
+          const startX = event.clientX, startY = event.clientY, startRect = unionRect(selectedItems), bases = new Map(selectedItems.map(value => [value, { x:Number(value.store[value.xKey] || 0), y:Number(value.store[value.yKey] || 0) }])); let started = false;
+          const move = moveEvent => { if (!started) { captureUndo(active === 'donation' ? 'donation' : 'overlay'); started = true; } const delta = snapDelta(startRect, moveEvent.clientX - startX, moveEvent.clientY - startY); moveSelection(delta.dx, delta.dy, bases); };
           const up = () => { doc.removeEventListener('pointermove', move); doc.removeEventListener('pointerup', up); };
           doc.addEventListener('pointermove', move); doc.addEventListener('pointerup', up);
-        });
+        };
       });
       Object.values(handles).forEach(handle => handle.addEventListener('pointerdown', event => {
-        if (!selected) return; event.preventDefault(); event.stopPropagation(); const direction = handle.dataset.resize;
-        const startX = event.clientX, startY = event.clientY, rect = selected.element.getBoundingClientRect(); const baseW = Number(selected.store[selected.widthKey] || rect.width), baseH = Number(selected.store[selected.heightKey] || rect.height);
-        const move = moveEvent => { const dx = moveEvent.clientX - startX, dy = moveEvent.clientY - startY; if (selected.widthKey && /e|w/.test(direction)) selected.store[selected.widthKey] = Math.max(20, Math.round(baseW + (direction.includes('e') ? dx : -dx))); if (selected.heightKey && /n|s/.test(direction)) selected.store[selected.heightKey] = Math.max(20, Math.round(baseH + (direction.includes('s') ? dy : -dy))); commit(); };
-        const up = () => { doc.removeEventListener('pointermove', move); doc.removeEventListener('pointerup', up); };
+        const selected = selectedItems.length === 1 ? selectedItems[0] : null; if (!selected) return; event.preventDefault(); event.stopPropagation(); const direction = handle.dataset.resize;
+        try { handle.setPointerCapture(event.pointerId); } catch {}
+        const startX = event.clientX, startY = event.clientY, rect = selected.element.getBoundingClientRect(), resizeFontKeys = fontSizeKeys(selected), computedFontSize = parseFloat(getComputedStyle(selected.element).fontSize) || 24; const baseW = Number(selected.store[selected.widthKey]) > 0 ? Number(selected.store[selected.widthKey]) : rect.width, baseH = Number(selected.store[selected.heightKey]) > 0 ? Number(selected.store[selected.heightKey]) : rect.height, baseX = Number(selected.store[selected.xKey] || 0), baseY = Number(selected.store[selected.yKey] || 0), baseFonts = new Map(resizeFontKeys.map(key => [key, Number(selected.store[key] || computedFontSize)])), resizeAnchors = captureResizeAnchors([selected]); let started = false;
+        const move = moveEvent => { if (!started) { captureUndo(active === 'donation' ? 'donation' : 'overlay'); started = true; } const dx = moveEvent.clientX - startX, dy = moveEvent.clientY - startY, hasW = selected.widthKey && /e|w/.test(direction), hasH = selected.heightKey && /n|s/.test(direction), lockRatio = hasW && hasH && !moveEvent.shiftKey && baseW > 0 && baseH > 0; let nextW = baseW, nextH = baseH; if (hasW) nextW = Math.max(20, Math.round(baseW + (direction.includes('e') ? dx : -dx))); if (hasH) nextH = Math.max(20, Math.round(baseH + (direction.includes('s') ? dy : -dy))); if (lockRatio) { const ratio = baseW / baseH, widthDelta = Math.abs(nextW - baseW), heightDelta = Math.abs(nextH - baseH) * ratio; if (widthDelta >= heightDelta) nextH = Math.max(20, Math.round(nextW / ratio)); else nextW = Math.max(20, Math.round(nextH * ratio)); } if (hasW) { selected.store[selected.widthKey] = nextW; if (selected.xKey) selected.store[selected.xKey] = Math.round(baseX + (direction.includes('e') ? nextW - baseW : baseW - nextW) / 2); } if (hasH) { selected.store[selected.heightKey] = nextH; if (selected.yKey) selected.store[selected.yKey] = Math.round(baseY + (direction.includes('s') ? nextH - baseH : baseH - nextH) / 2); } if (resizeFontKeys.length) { const sx = hasW ? (nextW - baseW) : 0, sy = hasH ? (nextH - baseH) : 0; const delta = sx && sy ? (sx + sy) / 2 : (sx || sy); resizeFontKeys.forEach(key => selected.store[key] = Math.max(8, Math.min(180, Math.round((baseFonts.get(key) || computedFontSize) + delta * .35)))); } commit(); restoreAnchorsAfterResize(resizeAnchors); };
+        const up = () => { try { handle.releasePointerCapture(event.pointerId); } catch {} doc.removeEventListener('pointermove', move); doc.removeEventListener('pointerup', up); };
         doc.addEventListener('pointermove', move); doc.addEventListener('pointerup', up);
       }));
       rotate.addEventListener('pointerdown', event => {
-        if (!selected || !selected.rotationKey) return; event.preventDefault(); event.stopPropagation(); rotate.style.cursor = 'grabbing'; const rect = selected.element.getBoundingClientRect(); const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2; const startAngle = Math.atan2(event.clientY - cy, event.clientX - cx) * 180 / Math.PI; const base = Number(selected.store[selected.rotationKey] || 0);
-        const move = moveEvent => { const angle = Math.atan2(moveEvent.clientY - cy, moveEvent.clientX - cx) * 180 / Math.PI; selected.store[selected.rotationKey] = Math.round(base + angle - startAngle); commit(); };
+        const selected = selectedItems.length === 1 ? selectedItems[0] : null; if (!selected || !selected.rotationKey) return; event.preventDefault(); event.stopPropagation(); rotate.style.cursor = 'grabbing'; const rect = selected.element.getBoundingClientRect(); const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2; const startAngle = Math.atan2(event.clientY - cy, event.clientX - cx) * 180 / Math.PI; const base = Number(selected.store[selected.rotationKey] || 0); let started = false;
+        const move = moveEvent => { if (!started) { captureUndo(active === 'donation' ? 'donation' : 'overlay'); started = true; } const angle = Math.atan2(moveEvent.clientY - cy, moveEvent.clientX - cx) * 180 / Math.PI; selected.store[selected.rotationKey] = Math.round(base + angle - startAngle); commit(); };
         const up = () => { rotate.style.cursor = 'grab'; doc.removeEventListener('pointermove', move); doc.removeEventListener('pointerup', up); };
         doc.addEventListener('pointermove', move); doc.addEventListener('pointerup', up);
       });
-      reset.addEventListener('click', event => { if (!selected) return; event.preventDefault(); event.stopPropagation(); [selected.xKey, selected.yKey, selected.widthKey, selected.heightKey, selected.rotationKey].filter(Boolean).forEach(key => selected.store[key] = Object.prototype.hasOwnProperty.call(selected.defaults, key) ? selected.defaults[key] : 0); commit(); });
-      doc.addEventListener('pointerdown', event => { if (event.target === doc.body || event.target === doc.documentElement) { selected = null; refreshBox(); } });
+      center.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); const rect = unionRect(selectedItems); if (!rect) return; captureUndo(active === 'donation' ? 'donation' : 'overlay'); const dx = doc.documentElement.clientWidth / 2 - (rect.left + rect.width / 2), dy = doc.documentElement.clientHeight / 2 - (rect.top + rect.height / 2), bases = new Map(selectedItems.map(item => [item, { x:Number(item.store[item.xKey] || 0), y:Number(item.store[item.yKey] || 0) }])); moveSelection(dx, dy, bases); });
+      reset.addEventListener('click', event => { if (!selectedItems.length) return; event.preventDefault(); event.stopPropagation(); captureUndo(active === 'donation' ? 'donation' : 'overlay'); selectedItems.forEach(selected => [selected.xKey, selected.yKey, selected.widthKey, selected.heightKey, selected.rotationKey].concat(fontSizeKeys(selected)).filter(Boolean).forEach(key => selected.store[key] = Object.prototype.hasOwnProperty.call(selected.defaults, key) ? selected.defaults[key] : 0)); commit(); });
+      disable.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); const items = selectedItems.filter(item => item.hideKeys && item.hideKeys.length); if (!items.length) return; captureUndo(active === 'donation' ? 'donation' : 'overlay'); items.forEach(item => item.hideKeys.forEach(key => item.store[key] = false)); selectedItems = []; openDirectSection(null); commit(); });
+      const documentPointerDown = event => {
+        if (win) { try { win.focus(); } catch {} }
+        if (event.button !== 0 || event.target.closest('#dcDirectEditor') || mappings.some(item => item.element && (event.target === item.element || item.element.contains(event.target)))) return;
+        const startX = event.clientX, startY = event.clientY; let dragged = false; marquee.style.display = 'none';
+        const move = moveEvent => { const left = Math.min(startX, moveEvent.clientX), top = Math.min(startY, moveEvent.clientY), width = Math.abs(moveEvent.clientX - startX), height = Math.abs(moveEvent.clientY - startY); if (width > 3 || height > 3) dragged = true; if (!dragged) return; marquee.style.display = 'block'; marquee.style.left = left + 'px'; marquee.style.top = top + 'px'; marquee.style.width = width + 'px'; marquee.style.height = height + 'px'; };
+        const up = moveEvent => { doc.removeEventListener('pointermove', move); doc.removeEventListener('pointerup', up); marquee.style.display = 'none'; if (!dragged) { setSelection([]); return; } const area = { left:Math.min(startX, moveEvent.clientX), top:Math.min(startY, moveEvent.clientY), right:Math.max(startX, moveEvent.clientX), bottom:Math.max(startY, moveEvent.clientY) }; setSelection(mappings.filter(item => { if (!visible(item)) return false; const rect = item.element.getBoundingClientRect(); return rect.right >= area.left && rect.left <= area.right && rect.bottom >= area.top && rect.top <= area.bottom; })); };
+        doc.addEventListener('pointermove', move); doc.addEventListener('pointerup', up);
+      };
+      const documentKeyDown = event => { if (isUndoShortcut(event)) { event.preventDefault(); event.stopPropagation(); undoEditor(); return; } if (event.key === 'Escape') { setSelection([]); return; } if (!selectedItems.length || !['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) return; event.preventDefault(); captureUndo(active === 'donation' ? 'donation' : 'overlay'); const step = event.shiftKey ? 10 : 1, dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0, dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0, bases = new Map(selectedItems.map(item => [item, { x:Number(item.store[item.xKey] || 0), y:Number(item.store[item.yKey] || 0) }])); moveSelection(dx, dy, bases); };
+      const parentKeyDown = event => { if (isUndoShortcut(event) || ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Escape'].includes(event.key)) documentKeyDown(event); };
+      doc.addEventListener('pointerdown', documentPointerDown); doc.addEventListener('keydown', documentKeyDown, true); document.addEventListener('keydown', parentKeyDown, true); window.addEventListener('keydown', parentKeyDown, true);
+      if (win) { win.__dcDirectRefresh = refreshBox; win.__dcSelectDirectLayer = layerId => { const item = mappings.find(value => value.layerId === layerId); if (item && !visible(item) && item.hideKeys && item.hideKeys.length) { captureUndo(active === 'donation' ? 'donation' : 'overlay'); item.hideKeys.forEach(key => item.store[key] = true); if (active === 'donation') fill('donation', donation); else fill('overlay', overlay); sendPreview(); setTimeout(() => { if (visible(item)) setSelection([item]); else setSelection([]); }, 120); return; } if (item && visible(item)) setSelection([item]); else setSelection([]); }; win.__dcDirectCleanup = () => { doc.removeEventListener('pointerdown', documentPointerDown); doc.removeEventListener('keydown', documentKeyDown, true); document.removeEventListener('keydown', parentKeyDown, true); window.removeEventListener('keydown', parentKeyDown, true); mappings.forEach(item => { if (item.element) item.element.onpointerdown = null; }); win.__dcDirectRefresh = null; win.__dcSelectDirectLayer = null; }; }
     }
     async function save() { donation.Language = lang; if (active === 'donation' || active === 'history') donation = await post('/donconnect/api/settings', donation); if (active === 'goal' || active === 'timer') overlay = await post('/donconnect/api/overlay-settings', overlay); if (active === 'credits') credits = await post('/donconnect/api/credits-settings', credits); if (active === 'leaderboard') leaderboard = await post('/donconnect/api/leaderboard-settings', leaderboard); if (active === 'filter') contentFilter = await post('/donconnect/api/content-filter-settings', contentFilter); fillAll(); translate(); sendPreview(); setTimeout(enableDirectPreviewEditing, 80); showStatus(t('settingsSaved')); }
     async function post(url, data) { const response = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) }); const json = await response.json(); if (!response.ok) throw new Error(json && json.error ? json.error : 'Request failed'); return json; }
-    function resetActive() { if (active === 'donation' || active === 'history') donation = Object.assign({}, donationDefaults, { Language:lang }); if (active === 'goal' || active === 'timer') { overlay = Object.assign({}, overlayDefaults); clearOverlayImages(); } if (active === 'credits') { credits = Object.assign({}, creditsDefaults); creditsPaused = false; updateCreditsPauseButton(); restartCreditsPreview(); } if (active === 'leaderboard') leaderboard = Object.assign({}, leaderboardDefaults); if (active === 'filter') contentFilter = Object.assign({}, filterDefaults); fillAll(); translate(); sendPreview(); }
-    async function resetAndSave() { resetActive(); await save(); reloadPreview(); }
-    function clearOverlayImages() { overlay.GoalImageDataUrl = ''; overlay.GoalImageName = ''; overlay.ShowGoalImage = false; overlay.DecorImageDataUrl = ''; overlay.DecorImageName = ''; overlay.ShowDecorImage = false; clearFileInput('goalImageFile'); clearFileInput('decorImageFile'); }
+    const goalResetKeys = ['Mode','PresetName','GoalEnabled','GoalHeaderTitle','GoalTitle','GoalCurrent','GoalTarget','GoalCurrency','GoalFormat','GoalDeadlineEnabled','GoalDeadlineTitle','GoalDeadlineEndsAt','GoalDeadlineExpiredText','GoalDeadlineShowDate','GoalDeadlineFontFamily','GoalDeadlineFontSize','GoalDeadlineTextAlign','GoalDeadlineX','GoalDeadlineY','GoalDeadlineWidth','GoalDeadlineHeight','GoalDeadlineRotation','ShowGoalBar','ShowGoalProgress','ShowGoalMeta','ShowGoalText','ShowGoalValue','ShowGoalImage','GoalImageDataUrl','GoalImageName','GoalImageMode','GoalImageFit','GoalImageWidth','GoalImageHeight','GoalImageX','GoalImageY','GoalImageRotation','GoalBarVisualMode','GoalFillDirection','GoalBarLength','ShowDecorImage','DecorImageDataUrl','DecorImageName','DecorImageX','DecorImageY','DecorImageWidth','DecorImageHeight','DecorImageRotation','GoalHeaderFontFamily','GoalTitleFontFamily','GoalValueFontFamily','ShowServices','ServicesTitle','ServicesTextAlign','ServicesFontSize','ServicesFontFamily','HiddenServices','GoalLayerOrder','ShowLastDonation','ShowLastDonor','ShowLastAmount','ShowLastPlatform','LastDonationFontSize','LastDonationTextAlign','LastDonationFontFamily','Bare','Width','PanelHeight','GoalBarWidth','GoalBarHeight','GoalBarX','GoalBarY','GoalBarRotation','GoalBarAlign','GoalTextPlacement','GoalTextAlign','GoalTextOffsetX','GoalTextOffsetY','GoalTextWidth','GoalTextHeight','GoalTextRotation','TitleX','TitleY','TitleWidth','TitleHeight','TitleRotation','GoalMetaX','GoalMetaY','GoalMetaWidth','GoalMetaHeight','GoalMetaRotation','ServicesX','ServicesY','ServicesWidth','ServicesHeight','ServicesRotation','LastDonationX','LastDonationY','LastDonationWidth','LastDonationHeight','LastDonationRotation'];
+    const timerResetKeys = ['Mode','TimerEnabled','TimerHeaderTitle','TimerTitle','TimerSubtitle','TimerStartSeconds','TimerUnitAmount','TimerSecondsPerUnit','TimerMaxSeconds','TimerCurrency','TimerMode','TimerShowServices','TimerShowConversion','Width','PanelHeight','TimerX','TimerY','TimerWidth','TimerHeight','TimerRotation','TimerHeaderX','TimerHeaderY','TimerHeaderWidth','TimerHeaderHeight','TimerHeaderRotation','TimerTitleX','TimerTitleY','TimerTitleWidth','TimerTitleHeight','TimerTitleRotation','TimerSubtitleX','TimerSubtitleY','TimerSubtitleWidth','TimerSubtitleHeight','TimerSubtitleRotation','TimerValueX','TimerValueY','TimerValueWidth','TimerValueHeight','TimerValueRotation','TimerMetaX','TimerMetaY','TimerMetaWidth','TimerMetaHeight','TimerMetaRotation','TimerConversionX','TimerConversionY','TimerConversionWidth','TimerConversionHeight','TimerConversionRotation','TimerTextAlign','TimerFontFamily','TimerHeaderFontFamily','TimerTitleFontFamily','TimerSubtitleFontFamily','TimerValueFontFamily','TimerMetaFontFamily','TimerConversionFontFamily','ShowTimerDecorImage','TimerDecorImageDataUrl','TimerDecorImageName','TimerDecorImageX','TimerDecorImageY','TimerDecorImageWidth','TimerDecorImageHeight','TimerDecorImageRotation','TimerLayerOrder'];
+    function resetKeys(target, defaults, keys) { keys.forEach(key => { if (!Object.prototype.hasOwnProperty.call(defaults, key)) return; const value = defaults[key]; target[key] = value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : value; }); }
+    function resetActive() { if (active === 'donation' || active === 'history') donation = Object.assign({}, donationDefaults, { Language:lang }); if (active === 'goal') { resetKeys(overlay, overlayDefaults, goalResetKeys); clearGoalOverlayImages(); } if (active === 'timer') { resetKeys(overlay, overlayDefaults, timerResetKeys); clearTimerOverlayImages(); } if (active === 'credits') { credits = Object.assign({}, creditsDefaults); creditsPaused = false; updateCreditsPauseButton(); restartCreditsPreview(); } if (active === 'leaderboard') leaderboard = Object.assign({}, leaderboardDefaults); if (active === 'filter') contentFilter = Object.assign({}, filterDefaults); fillAll(); translate(); sendPreview(); }
+    async function resetAndSave() { captureUndo(active === 'donation' || active === 'history' ? 'donation' : active === 'goal' || active === 'timer' ? 'overlay' : active); resetActive(); await save(); reloadPreview(); }
+    function clearGoalOverlayImages() { overlay.GoalImageDataUrl = ''; overlay.GoalImageName = ''; overlay.ShowGoalImage = false; overlay.DecorImageDataUrl = ''; overlay.DecorImageName = ''; overlay.ShowDecorImage = false; clearFileInput('goalImageFile'); clearFileInput('decorImageFile'); }
+    function clearTimerOverlayImages() { overlay.TimerDecorImageDataUrl = ''; overlay.TimerDecorImageName = ''; overlay.ShowTimerDecorImage = false; clearFileInput('timerDecorImageFile'); }
     function clearFileInput(id) { const input = document.getElementById(id); if (input) input.value = ''; }
-    function reloadPreview() { const frame = document.getElementById('frame'); if (!frame || !urls[active]) return; frame.src = urls[active] + '?preview=1&t=' + Date.now(); setTimeout(sendPreview, 400); }
+    function reloadPreview() { const frame = document.getElementById('frame'); if (!frame || !urls[active]) return; frame.src = previewSrc(active); setTimeout(sendPreview, 400); }
     async function testDonation(kind) { await fetch('/donconnect/api/test-donation', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind }) }); const goalState = await fetchJson('/donconnect/api/goal-state', null); if (goalState && goalState.goal) { overlay.GoalCurrent = goalState.goal.current; overlay.GoalCurrency = goalState.goal.currency || overlay.GoalCurrency; fillAll(); } await loadRecentDonations(); showStatus(t('testSent')); setTimeout(sendPreview, 300); }
     async function sendCustomTest() { const custom = { donor:value('customTestDonor'), amount:Number(value('customTestAmount') || 0), currency:value('customTestCurrency'), platform:value('customTestPlatform'), message:value('customTestMessage') }; await post('/donconnect/api/test-donation', { kind:'custom', custom }); await loadRecentDonations(); showStatus(t('testSent')); setTimeout(sendPreview, 300); }
     function value(id) { const el = document.getElementById(id); return el ? el.value : ''; }
@@ -9904,7 +11217,7 @@ public class DonConnectWidgetServer
     function renderServiceToggles() { const box = document.getElementById('serviceToggles'); if (!box) return; if (!Array.isArray(overlay.HiddenServices)) overlay.HiddenServices = []; box.innerHTML = serviceNames.map(name => `<label class='check-row'><input type='checkbox' data-hidden-service='${escapeAttr(name)}' ${overlay.HiddenServices.includes(name) ? '' : 'checked'}><span>${escapeHtml(name)}</span></label>`).join(''); box.querySelectorAll('[data-hidden-service]').forEach(input => input.addEventListener('change', () => { const name = input.dataset.hiddenService; overlay.HiddenServices = input.checked ? overlay.HiddenServices.filter(item => item !== name) : [...new Set([...overlay.HiddenServices, name])]; sendPreview(); })); }
     async function copyObs() { const input = document.getElementById('obsUrl'); const url = input ? input.value : location.origin + (urls[active] || urls.donation); try { await navigator.clipboard.writeText(url); showStatus(t('copied') + url); } catch { prompt(t('promptTitle'), url); } }
     async function exportSettings() { try { const bundle = await fetchJson('/donconnect/api/settings-export', null); if (!bundle) throw new Error('Export failed'); const blob = new Blob([JSON.stringify(bundle, null, 2)], { type:'application/json' }); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'DonConnect-profile-' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(link); link.click(); URL.revokeObjectURL(link.href); link.remove(); showStatus(t('settingsExported')); } catch (error) { showStatus(error && error.message ? error.message : String(error)); } }
-    async function importSettings(event) { const input = event && event.target; const file = input && input.files && input.files[0]; if (!file) return; try { const bundle = JSON.parse(await file.text()); await post('/donconnect/api/settings-import', bundle); showStatus(t('settingsImported')); setTimeout(() => location.reload(), 450); } catch (error) { showStatus(error && error.message ? error.message : String(error)); } finally { if (input) input.value = ''; } }
+    async function importSettings(event) { const input = event && event.target; const file = input && input.files && input.files[0]; if (!file) return; try { const bundle = JSON.parse(await file.text()); await post('/donconnect/api/settings-import', bundle); alertMedia = await fetchJson('/donconnect/api/alert-media', alertMedia); showStatus(t('settingsImported')); setTimeout(() => location.reload(), 450); } catch (error) { showStatus(error && error.message ? error.message : String(error)); } finally { if (input) input.value = ''; } }
     function initLanguage() { const saved = localStorage.getItem('donconnectEditorLanguage'); setLanguage(saved || donation.Language || 'en', false); }
     function setLanguage(value, persist = true) { lang = normalizeLanguage(value); donation.Language = lang; const select = document.getElementById('languageSelect'); if (select) select.value = lang; if (persist) localStorage.setItem('donconnectEditorLanguage', lang); safeRun(translate); sendPreview(); }
     function normalizeLanguage(value) { const text = String(value || '').toLowerCase(); if (text.startsWith('ru')) return 'ru'; if (text.startsWith('uk') || text.startsWith('ua')) return 'uk'; return 'en'; }
@@ -9917,6 +11230,8 @@ public class DonConnectWidgetServer
       setText('#languageLabel', t('language'));
       setText('#providersLink', t('providersPage'));
       setText('#gridToggleLabel', t('previewGrid'));
+      setText('#snapToggleLabel', t('previewSnap'));
+      setText('#layersTitle', t('layers'));
       setText('#exportSettings', t('exportSettings'));
       setText('#importSettings', t('importSettings'));
       setText('#profileNote', t('profileNote'));
@@ -9930,12 +11245,16 @@ public class DonConnectWidgetServer
       setLegend('donation', 1, t('donationPresets'));
       setLegend('donation', 2, t('donationSize'));
       setLegend('donation', 3, t('donationColors'));
-      setLegend('donation', 4, t('donationTemplates'));
-      setLegend('donation', 5, t('alertMedia'));
-      setLegend('donation', 6, t('alertRules'));
-      setLegend('donation', 7, t('alertAnimations'));
-      setLegend('donation', 8, t('donationVoice'));
-      setLegend('donation', 9, t('customAlert'));
+      setText('#donationLayoutSection legend', t('donationLayout'));
+      setText('#donorSection legend', t('donorSection'));
+      setText('#amountSection legend', t('amountSection'));
+      setText('#messageSection legend', t('messageSection'));
+      setText('#platformSection legend', t('platformSection'));
+      setText('#mediaSection legend', t('alertMedia'));
+      setLegend('donation', 10, t('alertRules'));
+      setLegend('donation', 11, t('alertAnimations'));
+      setLegend('donation', 12, t('donationVoice'));
+      setLegend('donation', 13, t('customAlert'));
       setLegend('goal', 1, t('goalPresets'));
       setLegend('goal', 2, t('goalEditor'));
       setLegend('goal', 3, t('goalText'));
@@ -9944,10 +11263,12 @@ public class DonConnectWidgetServer
       setLegend('goal', 6, t('decorImage'));
       setLegend('goal', 7, t('lastDonation'));
       setLegend('goal', 8, t('connectedServices'));
+      setLegend('goal', 9, t('goalDeadlineTimer'));
       setLegend('timer', 1, t('timerPresets'));
       setLegend('timer', 2, t('timerEditor'));
       setLegend('timer', 3, t('timerVisibility'));
       setLegend('timer', 4, t('timerLook'));
+      setLegend('timer', 5, t('decorImage'));
       setLegend('credits', 1, t('creditsPresets'));
       setLegend('credits', 2, t('creditsEditor'));
       setLegend('history', 1, t('obsDock'));
@@ -9972,6 +11293,7 @@ public class DonConnectWidgetServer
       setLabel('data-overlay', 'LastDonationFontSize', t('lastDonationSize'));
       setLabel('data-overlay', 'LastDonationTextAlign', t('lastDonationAlign'));
       setCreditsLabels();
+      renderCreditsSectionRows();
       setText('#creditsSpeedNote', t('creditsSpeedAuto'));
       setLeaderboardLabels();
       setFilterLabels();
@@ -9993,14 +11315,20 @@ public class DonConnectWidgetServer
       setText('select[data-overlay=GoalImageFit] option[value=contain]', t('imageContain'));
       setText('select[data-overlay=GoalImageFit] option[value=cover]', t('imageCover'));
       setText('select[data-leaderboard=Mode] option[value=overall]', t('overallTop'));
+      setText('select[data-leaderboard=Mode] option[value=month]', t('monthTop'));
+      setText('select[data-leaderboard=Mode] option[value=week]', t('weekTop'));
+      setText('select[data-leaderboard=Mode] option[value=stream]', t('streamTop'));
       setText('select[data-leaderboard=Mode] option[value=platform-slides]', t('platformSlides'));
       setText('select[data-leaderboard=Mode] option[value=recent]', t('recentDonations'));
       setText('#goalDrop', t('imageDrop'));
       setText('#clearGoalImage', t('clearImage'));
       setText('#decorDrop', t('imageDrop'));
       setText('#clearDecorImage', t('clearImage'));
+      setText('#timerDecorDrop', t('imageDrop'));
+      setText('#clearTimerDecorImage', t('clearImage'));
       setText('#addAlertRule', t('addRule'));
       setText('#alertMediaDrop', t('mediaDrop'));
+      setText('#leaderboardMediaDrop', t('imageDrop'));
       document.querySelectorAll('option[value=left]').forEach(el => el.textContent = t('left'));
       document.querySelectorAll('option[value=center]').forEach(el => el.textContent = t('center'));
       document.querySelectorAll('option[value=right]').forEach(el => el.textContent = t('right'));
@@ -10011,11 +11339,16 @@ public class DonConnectWidgetServer
       setText('select[data-donation=MediaPlacement] option[value=background]', t('behindText'));
       setText('select[data-donation=MediaFit] option[value=contain]', t('contain'));
       setText('select[data-donation=MediaFit] option[value=cover]', t('cover'));
+      setText('select[data-donation=DecorImageFit] option[value=contain]', t('contain'));
+      setText('select[data-donation=DecorImageFit] option[value=cover]', t('cover'));
+      setText('select[data-leaderboard=DecorImageFit] option[value=contain]', t('contain'));
+      setText('select[data-leaderboard=DecorImageFit] option[value=cover]', t('cover'));
       setText('select[data-overlay=TimerMode] option[value=countdown]', t('countdownMode'));
       setText('select[data-overlay=TimerMode] option[value=countup-reset]', t('countupMode'));
       setText('[data-pane=goal] fieldset:nth-of-type(8) .note', t('servicesNote'));
       setText('[data-pane=timer] .note', t('timerNote'));
       setText('[data-pane=credits] .note', t('creditsNote'));
+      setText('#creditsSectionsNote', t('creditsSectionsNote'));
       setText('[data-pane=history] .note', t('dockNote'));
       setText('#timerTestPanel .note', t('timerManualNote'));
       setText('[data-pane=leaderboard] fieldset:nth-of-type(4) .note', t('leaderboardNote'));
@@ -10039,6 +11372,14 @@ public class DonConnectWidgetServer
       setControlLabel('#filterTestCurrency', t('currency'));
       setControlLabel('#filterTestPlatform', t('platform'));
       setControlLabel('#filterTestMessage', t('message'));
+      setControlLabel('#goalDeadlineDays', t('goalDeadlineDays'));
+      setControlLabel('#goalDeadlineHours', t('goalDeadlineHours'));
+      setControlLabel('#goalDeadlineMinutes', t('goalDeadlineMinutes'));
+      setControlLabel('#goalDeadlineSeconds', t('goalDeadlineSeconds'));
+      setText('#goalDeadlineSetDuration', t('goalDeadlineSetDuration'));
+      setText('#goalDeadlineExtendDuration', t('goalDeadlineExtendDuration'));
+      setText('#goalDeadlineStop', t('goalDeadlineStop'));
+      setText('#goalDeadlineNote', t('goalDeadlineNote'));
       setText('[data-test=""50""]', t('test50'));
       setText('[data-test=""500""]', t('test500'));
       setText('[data-test=long]', t('testLong'));
@@ -10051,6 +11392,7 @@ public class DonConnectWidgetServer
       setText('#copy2', t('copy'));
       setText('#resetLeaderboardData', t('clearLeaderboard'));
       setText('#openAlertMedia', t('openMedia'));
+      setText('#openDonationLogs', t('openDonationLogs'));
       updateCreditsTestButton();
       setText('#pauseCredits', creditsPaused ? t('resumeCredits') : t('pauseCredits'));
       setText('#restartCredits', t('restartCredits'));
@@ -10078,15 +11420,16 @@ public class DonConnectWidgetServer
       safeRun(updateCreditsTestButton);
       safeRun(hideBaseFontRows);
     }
-    function setDonationLabels() { setLabel('data-donation', 'Width', t('width')); setLabel('data-donation', 'Height', t('height')); setLabel('data-donation', 'BorderRadius', t('borderRadius')); setLabel('data-donation', 'Padding', t('padding')); setLabel('data-donation', 'FontSize', t('fontSize')); setLabel('data-donation', 'Opacity', t('opacity')); setLabel('data-donation', 'AnimationDuration', t('animationMs')); setLabel('data-donation', 'BackgroundColor', t('background')); setLabel('data-donation', 'TextColor', t('text')); setLabel('data-donation', 'AccentColor', t('accent')); setLabel('data-donation', 'DonorTemplate', t('donor')); setLabel('data-donation', 'AmountTemplate', t('amount')); setLabel('data-donation', 'MessageTemplate', t('message')); setLabel('data-donation', 'PlatformTemplate', t('platform')); setLabel('data-donation', 'FontFamily', t('baseFont')); setLabel('data-donation', 'DonorFontFamily', t('donorFont')); setLabel('data-donation', 'AmountFontFamily', t('amountFont')); setLabel('data-donation', 'MessageFontFamily', t('messageFont')); setLabel('data-donation', 'PlatformFontFamily', t('platformFont')); setLabel('data-donation', 'ShowPlatform', t('showPlatform')); setLabel('data-donation', 'MediaFile', t('defaultVisual')); setLabel('data-donation', 'SoundFile', t('alertSound')); setLabel('data-donation', 'TextSoundFile', t('textSound')); setLabel('data-donation', 'MediaFit', t('visualFit')); setLabel('data-donation', 'MediaPlacement', t('mediaPlacement')); setLabel('data-donation', 'TextAlign', t('textAlign')); setLabel('data-donation', 'DonorX', t('donorX')); setLabel('data-donation', 'DonorY', t('donorY')); setLabel('data-donation', 'AmountX', t('amountX')); setLabel('data-donation', 'AmountY', t('amountY')); setLabel('data-donation', 'MessageX', t('messageX')); setLabel('data-donation', 'MessageY', t('messageY')); setLabel('data-donation', 'PlatformX', t('platform') + ' X'); setLabel('data-donation', 'PlatformY', t('platform') + ' Y'); setLabel('data-donation', 'MediaWidth', t('visualWidth')); setLabel('data-donation', 'MediaHeight', t('visualHeight')); setLabel('data-donation', 'MediaX', t('visualX')); setLabel('data-donation', 'MediaY', t('visualY')); setLabel('data-donation', 'VideoMuted', t('muteVideo')); setLabel('data-donation', 'ShowBackground', t('showBackground')); setLabel('data-donation', 'DisplayDuration', t('visibleDuration')); setLabel('data-donation', 'EntryAnimation', t('entryAnimation')); setLabel('data-donation', 'ExitAnimation', t('exitAnimation')); setLabel('data-donation', 'TextAnimation', t('donorTextAnimation')); setLabel('data-donation', 'SoundVolume', t('alertVolume')); setLabel('data-donation', 'TextSoundVolume', t('textSoundVolume')); setLabel('data-donation', 'SpeakDonation', t('speakDonation')); setLabel('data-donation', 'SpeechReadDonor', t('speechReadDonor')); setLabel('data-donation', 'SpeechReadAmount', t('speechReadAmount')); setLabel('data-donation', 'SpeechReadPlatform', t('speechReadPlatform')); setLabel('data-donation', 'SpeechReadMessage', t('speechReadMessage')); setLabel('data-donation', 'SpeechVoice', t('speechVoice')); setLabel('data-donation', 'SpeechRate', t('speechRate')); setLabel('data-donation', 'SpeechPitch', t('speechPitch')); setLabel('data-donation', 'SpeechVolume', t('speechVolume')); }
-    function setOverlayLabels() { setLabel('data-overlay', 'GoalEnabled', t('enableGoal')); setLabel('data-overlay', 'GoalHeaderTitle', t('title1')); setLabel('data-overlay', 'GoalTitle', t('title2')); setLabel('data-overlay', 'GoalCurrent', t('current')); setLabel('data-overlay', 'GoalTarget', t('target')); setLabel('data-overlay', 'GoalCurrency', t('currency')); setLabel('data-overlay', 'GoalFormat', t('format')); setLabel('data-overlay', 'FontFamily', t('baseFont')); setLabel('data-overlay', 'GoalHeaderFontFamily', t('title1Font')); setLabel('data-overlay', 'GoalTitleFontFamily', t('title2Font')); setLabel('data-overlay', 'GoalValueFontFamily', t('goalAmountFont')); setLabel('data-overlay', 'ServicesFontFamily', t('providersFont')); setLabel('data-overlay', 'LastDonationFontFamily', t('lastDonationFont')); setLabel('data-overlay', 'TimerFontFamily', t('timerFont')); setLabel('data-overlay', 'ShowGoalText', t('showGoalText')); setLabel('data-overlay', 'ShowGoalValue', t('showGoalValue')); setLabel('data-overlay', 'ShowGoalMeta', t('showGoalMeta')); setLabel('data-overlay', 'ShowGoalBar', t('showGoalBar')); setLabel('data-overlay', 'GoalBarVisualMode', t('visualType')); setLabel('data-overlay', 'GoalFillDirection', t('fillDirection')); setLabel('data-overlay', 'ShowGoalProgress', t('showGoalProgress')); setLabel('data-overlay', 'ShowPanelBackground', t('showPanelBackground')); setLabel('data-overlay', 'ShowGoalImage', t('showGoalImage')); setLabel('data-overlay', 'GoalImageFit', t('imageFit')); setLabel('data-overlay', 'GoalImageWidth', t('imageWidth')); setLabel('data-overlay', 'GoalImageHeight', t('imageHeight')); setLabel('data-overlay', 'GoalImageX', t('imageX')); setLabel('data-overlay', 'GoalImageY', t('imageY')); setLabel('data-overlay', 'ShowDecorImage', t('showDecorImage')); setLabel('data-overlay', 'DecorImageX', t('imageX')); setLabel('data-overlay', 'DecorImageY', t('imageY')); setLabel('data-overlay', 'DecorImageWidth', t('imageWidth')); setLabel('data-overlay', 'ShowLastDonor', t('showLastDonor')); setLabel('data-overlay', 'ShowLastAmount', t('showLastAmount')); setLabel('data-overlay', 'ShowLastPlatform', t('showLastPlatform')); setLabel('data-overlay', 'Width', t('panelWidth')); setLabel('data-overlay', 'GoalBarWidth', t('barWidth')); setLabel('data-overlay', 'GoalBarLength', t('barLength')); setLabel('data-overlay', 'GoalBarHeight', t('barHeight')); setLabel('data-overlay', 'GoalBarAlign', t('barAlign')); setLabel('data-overlay', 'GoalTextPlacement', t('textPlacement')); setLabel('data-overlay', 'GoalTextAlign', t('textAlign')); setLabel('data-overlay', 'GoalTextOffsetX', t('textX')); setLabel('data-overlay', 'GoalTextOffsetY', t('textY')); setLabel('data-overlay', 'BorderRadius', t('boxRadius')); setLabel('data-overlay', 'BarRadius', t('barRadius')); setLabel('data-overlay', 'Padding', t('padding')); setLabel('data-overlay', 'ValueSize', t('valueSize')); setLabel('data-overlay', 'ContainerOpacity', t('containerOpacity')); setLabel('data-overlay', 'BarOpacity', t('barOpacity')); setLabel('data-overlay', 'BackgroundColor', t('background')); setLabel('data-overlay', 'TextColor', t('text')); setLabel('data-overlay', 'MutedColor', t('muted')); setLabel('data-overlay', 'AccentColor', t('fill')); setLabel('data-overlay', 'ShowServices', t('showServices')); setLabel('data-overlay', 'ServicesTitle', t('servicesTitle')); setLabel('data-overlay', 'ServicesTextAlign', t('servicesAlign')); setLabel('data-overlay', 'ServicesFontSize', t('servicesSize')); setLabel('data-overlay', 'TimerEnabled', t('enableTimer')); setLabel('data-overlay', 'TimerHeaderTitle', t('title1')); setLabel('data-overlay', 'TimerTitle', t('title2')); setLabel('data-overlay', 'TimerSubtitle', t('subtitle')); setLabel('data-overlay', 'TimerStartSeconds', t('startSeconds')); setLabel('data-overlay', 'TimerUnitAmount', t('donationAmountStep')); setLabel('data-overlay', 'TimerSecondsPerUnit', t('secondsPerStep')); setLabel('data-overlay', 'TimerMaxSeconds', t('maxSeconds')); setLabel('data-overlay', 'TimerCurrency', t('currency')); setLabel('data-overlay', 'TitleSize', t('titleSize')); setLabel('data-overlay', 'LabelSize', t('labelSize')); setLabel('data-overlay', 'MetaSize', t('metaSize')); setLabel('data-overlay', 'Opacity', t('opacity')); setLabel('data-overlay', 'BarColor', t('emptyBar')); }
-    function setCreditsLabels() { setLabel('data-credits', 'CreditsEnabled', t('enableCredits')); setLabel('data-credits', 'Title', t('title')); setLabel('data-credits', 'Subtitle', t('subtitle')); setLabel('data-credits', 'Outro', t('outro')); setLabel('data-credits', 'SectionTitle', t('creditsSectionTitle')); setLabel('data-credits', 'ShowNames', t('showNames')); setLabel('data-credits', 'ShowAmounts', t('showAmounts')); setLabel('data-credits', 'ShowPlatforms', t('showPlatforms')); setLabel('data-credits', 'ShowMessages', t('showMessages')); setLabel('data-credits', 'Width', t('width')); setLabel('data-credits', 'FontSize', t('fontSize')); setLabel('data-credits', 'TransparentBackground', t('transparentBackground')); setLabel('data-credits', 'BackgroundColor', t('background')); setLabel('data-credits', 'TextColor', t('text')); setLabel('data-credits', 'MutedColor', t('muted')); setLabel('data-credits', 'AccentColor', t('accent')); setLabel('data-credits', 'FontFamily', t('baseFont')); setLabel('data-credits', 'TitleFontFamily', t('titleFont')); setLabel('data-credits', 'DetailFontFamily', t('detailsFont')); }
-    function setLeaderboardLabels() { setLabel('data-leaderboard', 'Enabled', t('enableLeaderboard')); setLabel('data-leaderboard', 'ShowTitle', t('showTitle')); setLabel('data-leaderboard', 'Title', t('title')); setLabel('data-leaderboard', 'Mode', t('mode')); setLabel('data-leaderboard', 'TopCount', t('rows')); setLabel('data-leaderboard', 'SlideDuration', t('slideDuration')); setLabel('data-leaderboard', 'ShowRanks', t('showRanks')); setLabel('data-leaderboard', 'ShowAmounts', t('showAmounts')); setLabel('data-leaderboard', 'ShowPlatforms', t('showPlatforms')); setLabel('data-leaderboard', 'FontFamily', t('baseFont')); setLabel('data-leaderboard', 'TitleFontFamily', t('titleFont')); setLabel('data-leaderboard', 'AmountFontFamily', t('amountFont')); setLabel('data-leaderboard', 'TextAlign', t('textAlign')); setLabel('data-leaderboard', 'Width', t('width')); setLabel('data-leaderboard', 'Padding', t('padding')); setLabel('data-leaderboard', 'BorderRadius', t('borderRadius')); setLabel('data-leaderboard', 'FontSize', t('fontSize')); setLabel('data-leaderboard', 'TitleSize', t('titleSize')); setLabel('data-leaderboard', 'RowGap', t('rowGap')); setLabel('data-leaderboard', 'Opacity', t('opacity')); setLabel('data-leaderboard', 'BackgroundColor', t('background')); setLabel('data-leaderboard', 'TextColor', t('text')); setLabel('data-leaderboard', 'MutedColor', t('muted')); setLabel('data-leaderboard', 'AccentColor', t('accent')); }
+    function setDonationLabels() { setLabel('data-donation', 'Width', t('width')); setLabel('data-donation', 'Height', t('height')); setLabel('data-donation', 'BorderRadius', t('borderRadius')); setLabel('data-donation', 'Padding', t('padding')); setLabel('data-donation', 'FontSize', t('fontSize')); setLabel('data-donation', 'Opacity', t('opacity')); setLabel('data-donation', 'AnimationDuration', t('animationMs')); setLabel('data-donation', 'BackgroundColor', t('background')); setLabel('data-donation', 'TextColor', t('text')); setLabel('data-donation', 'AccentColor', t('accent')); setLabel('data-donation', 'DonorTemplate', t('donor')); setLabel('data-donation', 'AmountTemplate', t('amount')); setLabel('data-donation', 'MessageTemplate', t('message')); setLabel('data-donation', 'PlatformTemplate', t('platform')); setLabel('data-donation', 'FontFamily', t('baseFont')); setLabel('data-donation', 'DonorFontFamily', t('donorFont')); setLabel('data-donation', 'AmountFontFamily', t('amountFont')); setLabel('data-donation', 'MessageFontFamily', t('messageFont')); setLabel('data-donation', 'PlatformFontFamily', t('platformFont')); setLabel('data-donation', 'DonorFontSize', t('donorFontSize')); setLabel('data-donation', 'AmountFontSize', t('amountFontSize')); setLabel('data-donation', 'MessageFontSize', t('messageFontSize')); setLabel('data-donation', 'PlatformFontSize', t('platformFontSize')); setLabel('data-donation', 'ShowDonor', t('showDonor')); setLabel('data-donation', 'ShowAmount', t('showAmount')); setLabel('data-donation', 'ShowMessage', t('showMessage')); setLabel('data-donation', 'ShowPlatform', t('showPlatform')); setLabel('data-donation', 'ShowMedia', t('showMedia')); setLabel('data-donation', 'ShowDecorImage', t('showDecorImage')); setLabel('data-donation', 'DecorImageFile', t('decorImage')); setLabel('data-donation', 'DecorImageFit', t('visualFit')); setLabel('data-donation', 'DecorImageWidth', t('imageWidth')); setLabel('data-donation', 'DecorImageHeight', t('imageHeight')); setLabel('data-donation', 'DecorImageX', t('imageX')); setLabel('data-donation', 'DecorImageY', t('imageY')); setLabel('data-donation', 'DecorImageRotation', t('visualRotation')); setLabel('data-donation', 'MediaFile', t('defaultVisual')); setLabel('data-donation', 'SoundFile', t('alertSound')); setLabel('data-donation', 'TextSoundFile', t('textSound')); setLabel('data-donation', 'MediaFit', t('visualFit')); setLabel('data-donation', 'MediaPlacement', t('mediaPlacement')); setLabel('data-donation', 'TextAlign', t('textAlign')); setLabel('data-donation', 'DonorX', t('donorX')); setLabel('data-donation', 'DonorY', t('donorY')); setLabel('data-donation', 'DonorWidth', t('donorWidth')); setLabel('data-donation', 'DonorHeight', t('donorHeight')); setLabel('data-donation', 'DonorRotation', t('donorRotation')); setLabel('data-donation', 'AmountX', t('amountX')); setLabel('data-donation', 'AmountY', t('amountY')); setLabel('data-donation', 'AmountWidth', t('amountWidth')); setLabel('data-donation', 'AmountHeight', t('amountHeight')); setLabel('data-donation', 'AmountRotation', t('amountRotation')); setLabel('data-donation', 'MessageX', t('messageX')); setLabel('data-donation', 'MessageY', t('messageY')); setLabel('data-donation', 'MessageWidth', t('messageWidth')); setLabel('data-donation', 'MessageHeight', t('messageHeight')); setLabel('data-donation', 'MessageRotation', t('messageRotation')); setLabel('data-donation', 'PlatformX', t('platform') + ' X'); setLabel('data-donation', 'PlatformY', t('platform') + ' Y'); setLabel('data-donation', 'PlatformWidth', t('platformWidth')); setLabel('data-donation', 'PlatformHeight', t('platformHeight')); setLabel('data-donation', 'PlatformRotation', t('platformRotation')); setLabel('data-donation', 'MediaWidth', t('visualWidth')); setLabel('data-donation', 'MediaHeight', t('visualHeight')); setLabel('data-donation', 'MediaX', t('visualX')); setLabel('data-donation', 'MediaY', t('visualY')); setLabel('data-donation', 'MediaRotation', t('visualRotation')); setLabel('data-donation', 'VideoMuted', t('muteVideo')); setLabel('data-donation', 'ShowBackground', t('showBackground')); setLabel('data-donation', 'DisplayDuration', t('visibleDuration')); setLabel('data-donation', 'EntryAnimation', t('entryAnimation')); setLabel('data-donation', 'EntryAnimationDuration', t('entryAnimationSpeed')); setLabel('data-donation', 'ExitAnimation', t('exitAnimation')); setLabel('data-donation', 'ExitAnimationDuration', t('exitAnimationSpeed')); setLabel('data-donation', 'TextAnimation', t('donorTextAnimation')); setLabel('data-donation', 'SoundVolume', t('alertVolume')); setLabel('data-donation', 'TextSoundVolume', t('textSoundVolume')); setLabel('data-donation', 'SpeakDonation', t('speakDonation')); setLabel('data-donation', 'SpeechReadDonor', t('speechReadDonor')); setLabel('data-donation', 'SpeechReadAmount', t('speechReadAmount')); setLabel('data-donation', 'SpeechReadPlatform', t('speechReadPlatform')); setLabel('data-donation', 'SpeechReadMessage', t('speechReadMessage')); setLabel('data-donation', 'SpeechVoice', t('speechVoice')); setLabel('data-donation', 'SpeechRate', t('speechRate')); setLabel('data-donation', 'SpeechPitch', t('speechPitch')); setLabel('data-donation', 'SpeechVolume', t('speechVolume')); }
+    function setOverlayLabels() { setLabel('data-overlay', 'GoalEnabled', t('enableGoal')); setLabel('data-overlay', 'GoalHeaderTitle', t('title1')); setLabel('data-overlay', 'GoalTitle', t('title2')); setLabel('data-overlay', 'GoalCurrent', t('current')); setLabel('data-overlay', 'GoalTarget', t('target')); setLabel('data-overlay', 'GoalCurrency', t('currency')); setLabel('data-overlay', 'GoalFormat', t('format')); setLabel('data-overlay', 'FontFamily', t('baseFont')); setLabel('data-overlay', 'GoalHeaderFontFamily', t('title1Font')); setLabel('data-overlay', 'GoalTitleFontFamily', t('title2Font')); setLabel('data-overlay', 'GoalValueFontFamily', t('goalAmountFont')); setLabel('data-overlay', 'GoalDeadlineEnabled', t('showGoalDeadline')); setLabel('data-overlay', 'GoalDeadlineTitle', t('goalDeadlineTitle')); setLabel('data-overlay', 'GoalDeadlineEndsAt', t('goalDeadlineEndsAt')); setLabel('data-overlay', 'GoalDeadlineExpiredText', t('goalDeadlineExpiredText')); setLabel('data-overlay', 'GoalDeadlineShowDate', t('goalDeadlineShowDate')); setLabel('data-overlay', 'GoalDeadlineFontFamily', t('goalDeadlineFont')); setLabel('data-overlay', 'GoalDeadlineFontSize', t('goalDeadlineSize')); setLabel('data-overlay', 'GoalDeadlineTextAlign', t('goalDeadlineAlign')); setLabel('data-overlay', 'GoalDeadlineX', t('goalDeadlineX')); setLabel('data-overlay', 'GoalDeadlineY', t('goalDeadlineY')); setLabel('data-overlay', 'GoalDeadlineWidth', t('goalDeadlineWidth')); setLabel('data-overlay', 'GoalDeadlineHeight', t('goalDeadlineHeight')); setLabel('data-overlay', 'GoalDeadlineRotation', t('goalDeadlineRotation')); setLabel('data-overlay', 'ServicesFontFamily', t('providersFont')); setLabel('data-overlay', 'LastDonationFontFamily', t('lastDonationFont')); setLabel('data-overlay', 'TimerFontFamily', t('timerFont')); setLabel('data-overlay', 'TimerHeaderFontFamily', t('title1Font')); setLabel('data-overlay', 'TimerTitleFontFamily', t('title2Font')); setLabel('data-overlay', 'TimerSubtitleFontFamily', t('subtitleFont')); setLabel('data-overlay', 'TimerValueFontFamily', t('timerValueFont')); setLabel('data-overlay', 'TimerMetaFontFamily', t('timerMetaFont')); setLabel('data-overlay', 'TimerConversionFontFamily', t('timerConversionFont')); setLabel('data-overlay', 'ShowGoalText', t('showGoalText')); setLabel('data-overlay', 'ShowGoalValue', t('showGoalValue')); setLabel('data-overlay', 'ShowGoalMeta', t('showGoalMeta')); setLabel('data-overlay', 'ShowGoalBar', t('showGoalBar')); setLabel('data-overlay', 'GoalBarVisualMode', t('visualType')); setLabel('data-overlay', 'GoalFillDirection', t('fillDirection')); setLabel('data-overlay', 'ShowGoalProgress', t('showGoalProgress')); setLabel('data-overlay', 'ShowPanelBackground', t('showPanelBackground')); setLabel('data-overlay', 'ShowGoalImage', t('showGoalImage')); setLabel('data-overlay', 'GoalImageFit', t('imageFit')); setLabel('data-overlay', 'GoalImageWidth', t('imageWidth')); setLabel('data-overlay', 'GoalImageHeight', t('imageHeight')); setLabel('data-overlay', 'GoalImageX', t('imageX')); setLabel('data-overlay', 'GoalImageY', t('imageY')); setLabel('data-overlay', 'ShowDecorImage', t('showDecorImage')); setLabel('data-overlay', 'ShowTimerDecorImage', t('showDecorImage')); setLabel('data-overlay', 'DecorImageX', t('imageX')); setLabel('data-overlay', 'DecorImageY', t('imageY')); setLabel('data-overlay', 'DecorImageWidth', t('imageWidth')); setLabel('data-overlay', 'DecorImageHeight', t('imageHeight')); setLabel('data-overlay', 'TimerDecorImageX', t('imageX')); setLabel('data-overlay', 'TimerDecorImageY', t('imageY')); setLabel('data-overlay', 'TimerDecorImageWidth', t('imageWidth')); setLabel('data-overlay', 'TimerDecorImageHeight', t('imageHeight')); setLabel('data-overlay', 'TimerDecorImageRotation', t('visualRotation')); setLabel('data-overlay', 'ShowLastDonor', t('showLastDonor')); setLabel('data-overlay', 'ShowLastAmount', t('showLastAmount')); setLabel('data-overlay', 'ShowLastPlatform', t('showLastPlatform')); setLabel('data-overlay', 'Width', t('panelWidth')); setLabel('data-overlay', 'GoalBarWidth', t('barWidth')); setLabel('data-overlay', 'GoalBarLength', t('barLength')); setLabel('data-overlay', 'GoalBarHeight', t('barHeight')); setLabel('data-overlay', 'GoalBarAlign', t('barAlign')); setLabel('data-overlay', 'GoalTextPlacement', t('textPlacement')); setLabel('data-overlay', 'GoalTextAlign', t('textAlign')); setLabel('data-overlay', 'GoalTextOffsetX', t('textX')); setLabel('data-overlay', 'GoalTextOffsetY', t('textY')); setLabel('data-overlay', 'BorderRadius', t('boxRadius')); setLabel('data-overlay', 'BarRadius', t('barRadius')); setLabel('data-overlay', 'Padding', t('padding')); setLabel('data-overlay', 'ValueSize', t('valueSize')); setLabel('data-overlay', 'ContainerOpacity', t('containerOpacity')); setLabel('data-overlay', 'BarOpacity', t('barOpacity')); setLabel('data-overlay', 'BackgroundColor', t('background')); setLabel('data-overlay', 'TextColor', t('text')); setLabel('data-overlay', 'MutedColor', t('muted')); setLabel('data-overlay', 'AccentColor', t('fill')); setLabel('data-overlay', 'ShowServices', t('showServices')); setLabel('data-overlay', 'ServicesTitle', t('servicesTitle')); setLabel('data-overlay', 'ServicesTextAlign', t('servicesAlign')); setLabel('data-overlay', 'ServicesFontSize', t('servicesSize')); setLabel('data-overlay', 'TimerEnabled', t('enableTimer')); setLabel('data-overlay', 'TimerHeaderTitle', t('title1')); setLabel('data-overlay', 'TimerTitle', t('title2')); setLabel('data-overlay', 'TimerSubtitle', t('subtitle')); setLabel('data-overlay', 'TimerStartSeconds', t('startSeconds')); setLabel('data-overlay', 'TimerUnitAmount', t('donationAmountStep')); setLabel('data-overlay', 'TimerSecondsPerUnit', t('secondsPerStep')); setLabel('data-overlay', 'TimerMaxSeconds', t('maxSeconds')); setLabel('data-overlay', 'TimerCurrency', t('currency')); setLabel('data-overlay', 'TitleSize', t('titleSize')); setLabel('data-overlay', 'LabelSize', t('labelSize')); setLabel('data-overlay', 'MetaSize', t('metaSize')); setLabel('data-overlay', 'Opacity', t('opacity')); setLabel('data-overlay', 'BarColor', t('emptyBar')); }
+    function setCreditsLabels() { setLabel('data-credits', 'CreditsEnabled', t('enableCredits')); setLabel('data-credits', 'DurationSeconds', t('rollSeconds')); setLabel('data-credits', 'LockDuration', t('lockCreditsSpeed')); setLabel('data-credits', 'Title', t('title')); setLabel('data-credits', 'Subtitle', t('subtitle')); setLabel('data-credits', 'Outro', t('outro')); setLabel('data-credits', 'SectionTitle', t('creditsSectionTitle')); setLabel('data-credits', 'SectionTitleFontFamily', t('sectionTitleFont')); setLabel('data-credits', 'SectionLabels', t('sectionLabels')); setLabel('data-credits', 'SectionFonts', t('sectionFonts')); setLabel('data-credits', 'ShowNames', t('showNames')); setLabel('data-credits', 'ShowAmounts', t('showAmounts')); setLabel('data-credits', 'ShowPlatforms', t('showPlatforms')); setLabel('data-credits', 'ShowMessages', t('showMessages')); setLabel('data-credits', 'Width', t('width')); setLabel('data-credits', 'FontSize', t('fontSize')); setLabel('data-credits', 'TransparentBackground', t('transparentBackground')); setLabel('data-credits', 'BackgroundColor', t('background')); setLabel('data-credits', 'TextColor', t('text')); setLabel('data-credits', 'MutedColor', t('muted')); setLabel('data-credits', 'AccentColor', t('accent')); setLabel('data-credits', 'FontFamily', t('baseFont')); setLabel('data-credits', 'TitleFontFamily', t('titleFont')); setLabel('data-credits', 'DetailFontFamily', t('detailsFont')); }
+    function setLeaderboardLabels() { setLabel('data-leaderboard', 'Enabled', t('enableLeaderboard')); setLabel('data-leaderboard', 'ShowTitle', t('showTitle')); setLabel('data-leaderboard', 'Title', t('title')); setLabel('data-leaderboard', 'Mode', t('mode')); setLabel('data-leaderboard', 'TopCount', t('rows')); setLabel('data-leaderboard', 'SlideDuration', t('slideDuration')); setLabel('data-leaderboard', 'SlideAnimation', t('slideAnimation')); setLabel('data-leaderboard', 'ShowRanks', t('showRanks')); setLabel('data-leaderboard', 'ShowAmounts', t('showAmounts')); setLabel('data-leaderboard', 'ShowPlatforms', t('showPlatforms')); setLabel('data-leaderboard', 'ResetOnStart', t('resetOnStart')); setLabel('data-leaderboard', 'FontFamily', t('baseFont')); setLabel('data-leaderboard', 'TitleFontFamily', t('titleFont')); setLabel('data-leaderboard', 'AmountFontFamily', t('amountFont')); setLabel('data-leaderboard', 'TextAlign', t('textAlign')); setLabel('data-leaderboard', 'ShowDecorImage', t('showDecorImage')); setLabel('data-leaderboard', 'DecorImageFile', t('decorImage')); setLabel('data-leaderboard', 'DecorImageFit', t('visualFit')); setLabel('data-leaderboard', 'DecorImageWidth', t('imageWidth')); setLabel('data-leaderboard', 'DecorImageHeight', t('imageHeight')); setLabel('data-leaderboard', 'DecorImageX', t('imageX')); setLabel('data-leaderboard', 'DecorImageY', t('imageY')); setLabel('data-leaderboard', 'DecorImageRotation', t('visualRotation')); setLabel('data-leaderboard', 'Width', t('width')); setLabel('data-leaderboard', 'Padding', t('padding')); setLabel('data-leaderboard', 'BorderRadius', t('borderRadius')); setLabel('data-leaderboard', 'FontSize', t('fontSize')); setLabel('data-leaderboard', 'TitleSize', t('titleSize')); setLabel('data-leaderboard', 'RowGap', t('rowGap')); setLabel('data-leaderboard', 'Opacity', t('opacity')); setLabel('data-leaderboard', 'BackgroundColor', t('background')); setLabel('data-leaderboard', 'TextColor', t('text')); setLabel('data-leaderboard', 'MutedColor', t('muted')); setLabel('data-leaderboard', 'AccentColor', t('accent')); }
     function setFilterLabels() { setLabel('data-filter', 'BlockedNames', t('blockedNames')); setLabel('data-filter', 'BlockedWords', t('blockedWords')); setLabel('data-filter', 'ReplacementName', t('replacementName')); setLabel('data-filter', 'ReplacementText', t('replacementText')); }
     function setLegend(pane, index, text) { setText(`[data-pane=${pane}] fieldset:nth-of-type(${index}) legend`, text); }
     function setLabel(attr, key, text) { document.querySelectorAll(`[${attr}=${key}]`).forEach(input => { const span = input.closest('label') ? input.closest('label').querySelector('span') : null; if (span) span.textContent = text; }); }
     function setControlLabel(selector, text) { const input = document.querySelector(selector); const span = input && input.closest('label') ? input.closest('label').querySelector('span') : null; if (span) span.textContent = text; }
     function setText(selector, text) { const el = document.querySelector(selector); if (el) el.textContent = text; }
+    function mediaUrl(file) { return '/donconnect/media/' + String(file || '').split('/').map(encodeURIComponent).join('/'); }
     function escapeHtml(value) { return String(value || '').replace(/[&<>'\x22]/g, ch => { const c = ch.charCodeAt(0); if (c === 38) return '&amp;'; if (c === 60) return '&lt;'; if (c === 62) return '&gt;'; if (c === 39) return '&#39;'; return '&quot;'; }); }
     function escapeAttr(value) { return escapeHtml(value); }
     function showStatus(text) { const box = document.getElementById('status'); if (!box) return; box.textContent = text; if (statusTimer) clearTimeout(statusTimer); statusTimer = setTimeout(() => { if (box) box.textContent = ''; statusTimer = null; }, 3500); }
@@ -10103,33 +11446,37 @@ public class DonConnectWidgetServer
   <meta name=""viewport"" content=""width=device-width, initial-scale=1"">
   <title>DonConnect Alert</title>
   <style>
-    :root { --w:680px; --h:360px; --r:18px; --p:26px; --fs:28px; --op:.88; --bg:#10131a; --text:#f8fbff; --accent:#35d07f; --dur:650ms; --media-w:260px; --media-h:170px; --media-x:0px; --media-y:0px; --media-rot:0deg; --donor-x:0px; --donor-y:0px; --donor-w:auto; --donor-h:auto; --donor-rot:0deg; --amount-x:0px; --amount-y:0px; --amount-w:auto; --amount-h:auto; --amount-rot:0deg; --message-x:0px; --message-y:0px; --message-w:auto; --message-h:auto; --message-rot:0deg; --platform-x:0px; --platform-y:0px; --platform-w:auto; --platform-h:auto; --platform-rot:0deg; --align:center; --media-fit:contain; --font:""Segoe UI"", Arial, sans-serif; --donor-font:var(--font); --amount-font:var(--font); --message-font:var(--font); --platform-font:var(--font); }
+" + LocalFontFaceCss() + @"
+    :root { --w:680px; --h:360px; --r:18px; --p:26px; --fs:28px; --donor-fs:28px; --amount-fs:25px; --message-fs:20px; --platform-fs:16px; --op:.88; --bg:#10131a; --text:#f8fbff; --accent:#35d07f; --dur:650ms; --entry-dur:650ms; --exit-dur:650ms; --media-w:260px; --media-h:170px; --media-slot-w:260px; --media-slot-h:170px; --decor-w:220px; --decor-h:160px; --decor-x:0px; --decor-y:0px; --decor-rot:0deg; --decor-fit:contain; --top-slot:68px; --donor-slot:34px; --amount-slot:29px; --platform-slot:22px; --message-slot:72px; --media-x:0px; --media-y:0px; --media-rot:0deg; --donor-x:0px; --donor-y:0px; --donor-w:auto; --donor-h:auto; --donor-rot:0deg; --amount-x:0px; --amount-y:0px; --amount-w:auto; --amount-h:auto; --amount-rot:0deg; --message-x:0px; --message-y:0px; --message-w:auto; --message-h:auto; --message-rot:0deg; --platform-x:0px; --platform-y:0px; --platform-w:auto; --platform-h:auto; --platform-rot:0deg; --align:center; --media-fit:contain; --font:""Segoe UI"", Arial, sans-serif; --donor-font:var(--font); --amount-font:var(--font); --message-font:var(--font); --platform-font:var(--font); }
     * { box-sizing: border-box; }
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent; font-family:var(--font); color:var(--text); }
     body { display:grid; place-items:center; }
-    .widget { position:relative; width:var(--w); height:var(--h); max-width:100vw; max-height:100vh; opacity:var(--op); background:var(--bg); border-radius:var(--r); padding:var(--p); display:grid; align-content:center; box-shadow:0 18px 46px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.12); overflow:hidden; }
+    .widget { position:relative; width:var(--w); height:var(--h); max-width:100vw; max-height:100vh; opacity:var(--op); background:var(--bg); border-radius:var(--r); padding:var(--p); display:grid; align-content:center; box-shadow:0 18px 46px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.12); overflow:visible; }
     .widget.hidden { visibility:hidden; opacity:0; pointer-events:none; }
     .widget.no-bg { background:transparent; border-color:transparent; box-shadow:none; }
-    .media { position:absolute; z-index:0; left:50%; top:50%; width:var(--media-w); height:var(--media-h); transform:translate(calc(-50% + var(--media-x)), calc(-50% + var(--media-y))) rotate(var(--media-rot)); transform-origin:center; pointer-events:none; }
-    .media.hidden, .platform.hidden { display:none; }
+    .media { position:absolute; z-index:1; left:50%; top:50%; width:var(--media-w); height:var(--media-h); transform:translate(calc(-50% + var(--media-x)), calc(-50% + var(--media-y))) rotate(var(--media-rot)); transform-origin:center; pointer-events:none; }
+    .decor-media { position:absolute; z-index:1; left:50%; top:50%; width:var(--decor-w); height:var(--decor-h); transform:translate(calc(-50% + var(--decor-x)), calc(-50% + var(--decor-y))) rotate(var(--decor-rot)); transform-origin:center; pointer-events:none; }
+    .decor-media img { width:100%; height:100%; display:block; object-fit:var(--decor-fit); }
+    .media.hidden, .decor-media.hidden, .donor.hidden, .amount.hidden, .platform.hidden, .message.hidden { display:none; }
+    .donor, .amount, .platform, .message { position:absolute; }
     .media img, .media video { width:100%; height:100%; display:none; object-fit:var(--media-fit); }
     .media img.active, .media video.active { display:block; }
-    .copy { position:relative; z-index:1; display:grid; gap:10px; min-width:0; text-align:var(--align); justify-items:stretch; }
-    .layout-above.has-media .copy { padding-top:calc(var(--media-h) * .62); } .layout-below.has-media .copy { padding-bottom:calc(var(--media-h) * .62); }
-    .layout-left.has-media .copy { padding-left:calc(var(--media-w) * .72); } .layout-right.has-media .copy { padding-right:calc(var(--media-w) * .72); }
+    .copy { position:absolute; inset:var(--p); min-width:0; text-align:var(--align); pointer-events:none; }
+    .layout-above.has-media .copy { padding-top:calc(var(--media-slot-h) * .62); } .layout-below.has-media .copy { padding-bottom:calc(var(--media-slot-h) * .62); }
+    .layout-left.has-media .copy { padding-left:calc(var(--media-slot-w) * .72); } .layout-right.has-media .copy { padding-right:calc(var(--media-slot-w) * .72); }
     .layout-above .media { top:24%; } .layout-below .media { top:76%; } .layout-left .media { left:22%; } .layout-right .media { left:78%; }
-    .top { display:grid; justify-items:stretch; gap:5px; min-width:0; }
-    .donor { width:var(--donor-w); height:var(--donor-h); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transform:translate(var(--donor-x), var(--donor-y)) rotate(var(--donor-rot)); transform-origin:center; font-family:var(--donor-font); font-size:var(--fs); font-weight:900; }
-    .amount { width:var(--amount-w); height:var(--amount-h); overflow:hidden; color:var(--accent); white-space:nowrap; transform:translate(var(--amount-x), var(--amount-y)) rotate(var(--amount-rot)); transform-origin:center; font-family:var(--amount-font); font-size:calc(var(--fs) * .9); font-weight:900; }
-    .platform { width:var(--platform-w); height:var(--platform-h); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; transform:translate(var(--platform-x), var(--platform-y)) rotate(var(--platform-rot)); transform-origin:center; color:var(--accent); font-family:var(--platform-font); font-size:calc(var(--fs) * .58); font-weight:800; text-transform:uppercase; }
-    .message { width:var(--message-w); height:var(--message-h); min-width:0; overflow:hidden; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; transform:translate(var(--message-x), var(--message-y)) rotate(var(--message-rot)); transform-origin:center; font-family:var(--message-font); font-size:calc(var(--fs) * .72); line-height:1.28; color:var(--text); opacity:.88; }
-    .entry-fade { animation:entryFade var(--dur) ease both; } .exit-fade { animation:exitFade var(--dur) ease both; }
-    .entry-slide-left { animation:entryLeft var(--dur) ease both; } .exit-slide-left { animation:exitLeft var(--dur) ease both; }
-    .entry-slide-right { animation:entryRight var(--dur) ease both; } .exit-slide-right { animation:exitRight var(--dur) ease both; }
-    .entry-slide-up { animation:entryUp var(--dur) ease both; } .exit-slide-up { animation:exitUp var(--dur) ease both; }
-    .entry-slide-down { animation:entryDown var(--dur) ease both; } .exit-slide-down { animation:exitDown var(--dur) ease both; }
-    .entry-zoom { animation:entryZoom var(--dur) ease both; } .exit-zoom { animation:exitZoom var(--dur) ease both; }
-    .exit-scatter { animation:scatterOut var(--dur) ease both; }
+    .top { position:absolute; inset:0; pointer-events:none; }
+    .donor { width:var(--donor-w); height:var(--donor-h); min-width:0; left:50%; top:calc(50% - var(--amount-slot) - 20px); overflow:visible; text-overflow:ellipsis; white-space:nowrap; transform:translate(calc(-50% + var(--donor-x)), var(--donor-y)) rotate(var(--donor-rot)); transform-origin:center; font-family:var(--donor-font); font-size:var(--donor-fs); font-weight:900; pointer-events:auto; }
+    .amount { width:var(--amount-w); height:var(--amount-h); left:50%; top:calc(50% + 4px); overflow:visible; color:var(--accent); white-space:nowrap; transform:translate(calc(-50% + var(--amount-x)), var(--amount-y)) rotate(var(--amount-rot)); transform-origin:center; font-family:var(--amount-font); font-size:var(--amount-fs); font-weight:900; pointer-events:auto; }
+    .platform { width:var(--platform-w); height:var(--platform-h); left:50%; top:calc(50% + var(--amount-slot) + 32px); overflow:visible; text-overflow:ellipsis; white-space:nowrap; transform:translate(calc(-50% + var(--platform-x)), var(--platform-y)) rotate(var(--platform-rot)); transform-origin:center; color:var(--accent); font-family:var(--platform-font); font-size:var(--platform-fs); font-weight:800; text-transform:uppercase; pointer-events:auto; }
+    .message { width:var(--message-w); height:var(--message-h); min-width:0; left:50%; top:calc(50% + var(--amount-slot) + var(--platform-slot) + 56px); overflow:visible; display:block; transform:translate(calc(-50% + var(--message-x)), var(--message-y)) rotate(var(--message-rot)); transform-origin:center; font-family:var(--message-font); font-size:var(--message-fs); line-height:1.28; color:var(--text); opacity:.88; pointer-events:auto; }
+    .entry-fade { animation:entryFade var(--entry-dur) ease both; } .exit-fade { animation:exitFade var(--exit-dur) ease both; }
+    .entry-slide-left { animation:entryLeft var(--entry-dur) ease both; } .exit-slide-left { animation:exitLeft var(--exit-dur) ease both; }
+    .entry-slide-right { animation:entryRight var(--entry-dur) ease both; } .exit-slide-right { animation:exitRight var(--exit-dur) ease both; }
+    .entry-slide-up { animation:entryUp var(--entry-dur) ease both; } .exit-slide-up { animation:exitUp var(--exit-dur) ease both; }
+    .entry-slide-down { animation:entryDown var(--entry-dur) ease both; } .exit-slide-down { animation:exitDown var(--exit-dur) ease both; }
+    .entry-zoom { animation:entryZoom var(--entry-dur) ease both; } .exit-zoom { animation:exitZoom var(--exit-dur) ease both; }
+    .exit-scatter { animation:scatterOut var(--exit-dur) ease both; }
     .text-fade { animation:textFade var(--dur) ease both; }
     .text-typewriter { animation:typewriter var(--dur) steps(24,end) both; }
     .text-reveal-left { animation:textRevealLeft var(--dur) ease both; }
@@ -10155,6 +11502,7 @@ public class DonConnectWidgetServer
 </head>
 <body>
   <section class=""widget hidden"" id=""widget"">
+    <div class=""decor-media hidden"" id=""decor""><img id=""decorImage"" alt=""""></div>
     <div class=""media hidden"" id=""media""><img id=""mediaImage"" alt=""""><video id=""mediaVideo"" playsinline></video></div>
     <div class=""copy"" id=""copy"">
       <div class=""top""><div class=""donor"" id=""donor"">Test donor</div><div class=""amount"" id=""amount"">50 RUB</div></div>
@@ -10198,49 +11546,76 @@ public class DonConnectWidgetServer
     function applySettings(current) {
       if (!current) return;
       const root = document.documentElement.style;
+      const baseSize = Math.max(12, Number(current.FontSize || 28));
+      const donorSlot = Math.round(baseSize * 1.22);
+      const amountSlot = Math.round(baseSize * 1.04);
+      const platformSlot = Math.round(baseSize * .78);
+      const messageSlot = Math.round(baseSize * 2.55);
       root.setProperty('--w', px(current.Width));
       root.setProperty('--h', px(current.Height));
       root.setProperty('--r', px(current.BorderRadius));
       root.setProperty('--p', px(current.Padding));
       root.setProperty('--fs', px(current.FontSize));
+      root.setProperty('--donor-slot', px(donorSlot));
+      root.setProperty('--amount-slot', px(amountSlot));
+      root.setProperty('--top-slot', px(donorSlot + amountSlot + 5));
+      root.setProperty('--platform-slot', px(platformSlot));
+      root.setProperty('--message-slot', px(messageSlot));
+      root.setProperty('--media-slot-w', px(260));
+      root.setProperty('--media-slot-h', px(170));
+      root.setProperty('--donor-fs', px(current.DonorFontSize || current.FontSize || 28));
+      root.setProperty('--amount-fs', px(current.AmountFontSize || Math.round((current.FontSize || 28) * .9)));
+      root.setProperty('--message-fs', px(current.MessageFontSize || Math.round((current.FontSize || 28) * .72)));
+      root.setProperty('--platform-fs', px(current.PlatformFontSize || Math.round((current.FontSize || 28) * .58)));
       root.setProperty('--op', current.Opacity ?? .88);
       root.setProperty('--bg', current.BackgroundColor || '#10131a');
       root.setProperty('--text', current.TextColor || '#f8fbff');
       root.setProperty('--accent', current.AccentColor || '#35d07f');
       root.setProperty('--dur', (current.AnimationDuration ?? 650) + 'ms');
+      root.setProperty('--entry-dur', (current.EntryAnimationDuration ?? current.AnimationDuration ?? 650) + 'ms');
+      root.setProperty('--exit-dur', (current.ExitAnimationDuration ?? current.AnimationDuration ?? 650) + 'ms');
       root.setProperty('--media-w', px(current.MediaWidth || 240));
       root.setProperty('--media-h', px(current.MediaHeight || 150));
       root.setProperty('--media-x', px(current.MediaX || 0));
       root.setProperty('--media-y', px(current.MediaY || 0));
       root.setProperty('--media-rot', degrees(current.MediaRotation));
+      root.setProperty('--decor-w', px(current.DecorImageWidth || 220));
+      root.setProperty('--decor-h', px(current.DecorImageHeight || 160));
+      root.setProperty('--decor-x', px(current.DecorImageX || 0));
+      root.setProperty('--decor-y', px(current.DecorImageY || 0));
+      root.setProperty('--decor-rot', degrees(current.DecorImageRotation));
       root.setProperty('--donor-x', px(current.DonorX || 0));
       root.setProperty('--donor-y', px(current.DonorY || 0));
-      root.setProperty('--donor-w', dimension(current.DonorWidth));
-      root.setProperty('--donor-h', dimension(current.DonorHeight));
+      root.setProperty('--donor-w', widthDimension(current.DonorWidth));
+      root.setProperty('--donor-h', heightDimension(current.DonorHeight));
       root.setProperty('--donor-rot', degrees(current.DonorRotation));
       root.setProperty('--amount-x', px(current.AmountX || 0));
       root.setProperty('--amount-y', px(current.AmountY || 0));
-      root.setProperty('--amount-w', dimension(current.AmountWidth));
-      root.setProperty('--amount-h', dimension(current.AmountHeight));
+      root.setProperty('--amount-w', widthDimension(current.AmountWidth));
+      root.setProperty('--amount-h', heightDimension(current.AmountHeight));
       root.setProperty('--amount-rot', degrees(current.AmountRotation));
       root.setProperty('--message-x', px(current.MessageX || 0));
       root.setProperty('--message-y', px(current.MessageY || 0));
-      root.setProperty('--message-w', dimension(current.MessageWidth));
-      root.setProperty('--message-h', dimension(current.MessageHeight));
+      root.setProperty('--message-w', widthDimension(current.MessageWidth));
+      root.setProperty('--message-h', heightDimension(current.MessageHeight));
       root.setProperty('--message-rot', degrees(current.MessageRotation));
       root.setProperty('--platform-x', px(current.PlatformX || 0));
       root.setProperty('--platform-y', px(current.PlatformY || 0));
-      root.setProperty('--platform-w', dimension(current.PlatformWidth));
-      root.setProperty('--platform-h', dimension(current.PlatformHeight));
+      root.setProperty('--platform-w', widthDimension(current.PlatformWidth));
+      root.setProperty('--platform-h', heightDimension(current.PlatformHeight));
       root.setProperty('--platform-rot', degrees(current.PlatformRotation));
       root.setProperty('--align', ['left','center','right'].includes(current.TextAlign) ? current.TextAlign : 'center');
       root.setProperty('--media-fit', current.MediaFit === 'cover' ? 'cover' : 'contain');
+      root.setProperty('--decor-fit', current.DecorImageFit === 'cover' ? 'cover' : 'contain');
       root.setProperty('--font', fontStack(current.FontFamily, 'Segoe UI, Arial, sans-serif'));
       root.setProperty('--donor-font', fontStack(current.DonorFontFamily, 'Segoe UI, Arial, sans-serif'));
       root.setProperty('--amount-font', fontStack(current.AmountFontFamily, 'Segoe UI, Arial, sans-serif'));
       root.setProperty('--message-font', fontStack(current.MessageFontFamily, 'Segoe UI, Arial, sans-serif'));
       root.setProperty('--platform-font', fontStack(current.PlatformFontFamily, 'Segoe UI, Arial, sans-serif'));
+      applyLayerOrder(current);
     }
+    function applyLayerOrder(current) { const order = normalizeLayerOrder(current && current.LayerOrder, ['background','decor','media','donor','amount','message','platform']); order.forEach((id, index) => { const el = document.getElementById(id); if (el) el.style.zIndex = String(index + 1); }); }
+    function normalizeLayerOrder(value, defaults) { const result = []; (Array.isArray(value) ? value : []).forEach(id => { id = String(id || ''); if (defaults.includes(id) && !result.includes(id)) result.push(id); }); defaults.forEach(id => { if (!result.includes(id)) result.push(id); }); return result; }
     function render(animate) {
       const current = resolveSettings(donation);
       applySettings(current);
@@ -10252,10 +11627,14 @@ public class DonConnectWidgetServer
       document.getElementById('donor').textContent = tpl(current.DonorTemplate || '{donor}', donor, amount, currency, message, platform);
       document.getElementById('amount').textContent = tpl(current.AmountTemplate || '{amount} {currency}', donor, amount, currency, message, platform);
       document.getElementById('message').textContent = tpl(current.MessageTemplate || '{message}', donor, amount, currency, message, platform);
+      document.getElementById('donor').classList.toggle('hidden', current.ShowDonor === false);
+      document.getElementById('amount').classList.toggle('hidden', current.ShowAmount === false);
+      document.getElementById('message').classList.toggle('hidden', current.ShowMessage === false);
       const platformNode = document.getElementById('platform');
       platformNode.textContent = tpl(current.PlatformTemplate || '{platform}', donor, amount, currency, message, platform);
       platformNode.classList.toggle('hidden', current.ShowPlatform === false || !platformNode.textContent.trim());
       document.getElementById('widget').classList.toggle('no-bg', current.ShowBackground === false);
+      renderDecor(current);
       renderMedia(current);
       if (animate) showAlert(current);
     }
@@ -10282,7 +11661,7 @@ public class DonConnectWidgetServer
       const video = document.getElementById('mediaVideo');
       const file = String(current.MediaFile || '');
       const isVideo = /\.(mp4|webm)$/i.test(file);
-      media.classList.toggle('hidden', !file);
+      media.classList.toggle('hidden', current.ShowMedia === false || !file);
       image.classList.toggle('active', !!file && !isVideo);
       video.classList.toggle('active', !!file && isVideo);
       if (!file) { image.removeAttribute('src'); video.removeAttribute('src'); return; }
@@ -10293,6 +11672,16 @@ public class DonConnectWidgetServer
       } else if (image.getAttribute('src') !== url) {
         image.setAttribute('src', url);
       }
+    }
+    function renderDecor(current) {
+      const box = document.getElementById('decor');
+      const image = document.getElementById('decorImage');
+      if (!box || !image) return;
+      const file = String(current.DecorImageFile || '');
+      box.classList.toggle('hidden', current.ShowDecorImage === false || !file);
+      if (!file) { image.removeAttribute('src'); return; }
+      const url = mediaUrl(file);
+      if (image.getAttribute('src') !== url) image.setAttribute('src', url);
     }
     function showPreview() {
       const current = resolveSettings(donation);
@@ -10315,12 +11704,13 @@ public class DonConnectWidgetServer
       if ((current.TextAnimation || 'none') !== 'none') playAudio(current.TextSoundFile, current.TextSoundVolume);
       if (browserTts) speakDonation(current);
       const duration = Math.max(500, Number(current.DisplayDuration || 9000));
-      const animation = Math.max(0, Number(current.AnimationDuration || 650));
+      const entryAnimation = Math.max(0, Number(current.EntryAnimationDuration ?? current.AnimationDuration ?? 650));
+      const exitAnimation = Math.max(0, Number(current.ExitAnimationDuration ?? current.AnimationDuration ?? 650));
       exitTimer = setTimeout(() => {
         box.className = widgetClass(current);
         void box.offsetWidth;
         box.classList.add('exit-' + animationName(current.ExitAnimation, 'fade'));
-      }, Math.max(animation, duration - animation));
+      }, Math.max(entryAnimation, duration - exitAnimation));
       hideTimer = setTimeout(() => { if (!preview) box.classList.add('hidden'); }, duration);
     }
     function playAudio(file, volume) {
@@ -10352,16 +11742,17 @@ public class DonConnectWidgetServer
       if (!target || !window.speechSynthesis) return null;
       return (window.speechSynthesis.getVoices() || []).find(voice => String(voice.name || '').toLowerCase() === target) || null;
     }
-    function widgetClass(current) { const placement = ['above','below','left','right','background'].includes(current.MediaPlacement) ? current.MediaPlacement : 'above'; return 'widget layout-' + placement + (current.MediaFile ? ' has-media' : '') + (current.ShowBackground === false ? ' no-bg' : ''); }
+    function widgetClass(current) { const placement = ['above','below','left','right','background'].includes(current.MediaPlacement) ? current.MediaPlacement : 'above'; return 'widget layout-' + placement + (current.ShowMedia !== false && current.MediaFile ? ' has-media' : '') + (current.ShowBackground === false ? ' no-bg' : ''); }
     function animationName(value, fallback) { return String(value || fallback).replace(/[^a-z-]/g, '') || fallback; }
     function mediaUrl(file) { return '/donconnect/media/' + String(file || '').split('/').map(encodeURIComponent).join('/'); }
     function tpl(template, donor, amount, currency, message, platform) {
       return String(template || '').replaceAll('{donor}', donor).replaceAll('{amount}', amount).replaceAll('{currency}', currency).replaceAll('{message}', message).replaceAll('{platform}', platform).replaceAll('{source}', platform);
     }
     function px(value) { return `${Number(value || 0)}px`; }
-    function dimension(value) { return Number(value || 0) > 0 ? px(value) : 'auto'; }
+    function widthDimension(value) { return Number(value || 0) > 0 ? px(value) : '100%'; }
+    function heightDimension(value) { return Number(value || 0) > 0 ? px(value) : 'auto'; }
     function degrees(value) { return `${Number(value || 0)}deg`; }
-    function fontStack(value, fallback) { const name = String(value || '').trim(); const safe = name.replace(/[""\\]/g, '').replace(/\s+/g, ' ').trim(); return safe ? '""' + safe + '"", ' + fallback : fallback; }
+    function fontStack(value, fallback) { const clean = name => String(name || '').replace(/[""\\\\]/g, '').replace(/\s+/g, ' ').trim(); const raw = String(value || '').trim(); if (!raw) return fallback; const generic = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace)$/i; const aliases = name => { const list = [name]; const compact = name.replace(/\s+/g, ''); if (compact && compact.toLowerCase() !== name.toLowerCase()) list.push(compact); const short = name.replace(/[\s_-]+(Regular|Book|Roman|Bold|Italic|Oblique|Medium|Light|Thin|Black|ExtraBold|SemiBold|DemiBold|ExtraLight|Heavy)$/i, '').trim(); if (short && short.toLowerCase() !== name.toLowerCase()) { list.push(short); const shortCompact = short.replace(/\s+/g, ''); if (shortCompact && shortCompact.toLowerCase() !== short.toLowerCase()) list.push(shortCompact); } return list; }; const seen = new Set(); const families = raw.split(',').map(clean).filter(Boolean).flatMap(aliases).filter(name => !seen.has(name.toLowerCase()) && seen.add(name.toLowerCase())); const css = families.map(name => generic.test(name) ? name : '""' + name + '""').join(', '); return css ? css + ', ' + fallback : fallback; }
   </script>
 </body>
 </html>";
@@ -10370,6 +11761,11 @@ public class DonConnectWidgetServer
     private string GoalTimerHtml(string mode)
     {
         mode = NormalizeChoice(mode, "goal", "goal", "timer", "both");
+        string panelInitialClass = mode == "timer" ? "panel timer-only" : "panel";
+        string gridInitialClass = mode == "both" ? "grid" : "grid single";
+        string goalInitialClass = mode == "timer" ? " class=\"hidden\"" : "";
+        string timerInitialClass = mode == "goal" || mode == "both" ? " class=\"hidden\"" : "";
+        string bodyModeClass = "mode-" + mode;
         return @"<!doctype html>
 <html lang=""en"">
 <head>
@@ -10377,14 +11773,18 @@ public class DonConnectWidgetServer
   <meta name=""viewport"" content=""width=device-width, initial-scale=1"">
   <title>DonConnect Goal Timer</title>
   <style>
-    :root { --w:920px; --r:22px; --bar-r:22px; --p:22px; --title:30px; --value:42px; --label:17px; --meta:17px; --container-op:.94; --bar-op:1; --bg:#10131a; --bg-rgba:rgba(16,19,26,.94); --text:#f8fbff; --muted:#b8c0cc; --accent:#7c3cff; --bar:#1e2026; --barh:84px; --barl:680px; --bar-self:center; --bar-justify:center; --goal-align:center; --goal-x:0px; --goal-y:0px; --timer-x:0px; --timer-y:0px; --timer-w:680px; --timer-align:center; --services-align:center; --services-justify:center; --services-size:14px; --last-size:14px; --last-align:center; --pct:0%; --image-fit:contain; --imagew:680px; --imageh:220px; --image-x:0px; --image-y:0px; --decor-x:0px; --decor-y:0px; --decor-w:220px; --font:""Segoe UI"", Arial, sans-serif; --header-font:var(--font); --goal-title-font:var(--font); --goal-value-font:var(--font); --services-font:var(--font); --last-font:var(--font); --timer-font:var(--font); }
+" + LocalFontFaceCss() + @"
+    :root { --w:920px; --r:22px; --bar-r:22px; --p:22px; --title:30px; --value:42px; --label:17px; --meta:17px; --container-op:.94; --bar-op:1; --bg:#10131a; --bg-rgba:rgba(16,19,26,.94); --text:#f8fbff; --muted:#b8c0cc; --accent:#7c3cff; --bar:#1e2026; --barh:84px; --barl:680px; --bar-self:center; --bar-justify:center; --goal-align:center; --goal-x:0px; --goal-y:0px; --timer-x:0px; --timer-y:0px; --timer-w:680px; --timer-align:center; --services-align:center; --services-justify:center; --services-size:14px; --last-size:14px; --last-align:center; --goal-deadline-size:18px; --goal-deadline-align:center; --goal-deadline-font:var(--font); --pct:0%; --image-fit:contain; --imagew:680px; --imageh:220px; --image-x:0px; --image-y:0px; --decor-x:0px; --decor-y:0px; --decor-w:220px; --decor-h:auto; --font:""Segoe UI"", Arial, sans-serif; --header-font:var(--font); --goal-title-font:var(--font); --goal-value-font:var(--font); --services-font:var(--font); --last-font:var(--font); --timer-font:var(--font); --timer-title-font:var(--timer-font); --timer-subtitle-font:var(--timer-font); --timer-value-font:var(--timer-font); --timer-meta-font:var(--timer-font); --timer-conversion-font:var(--timer-font); }
     * { box-sizing:border-box; }
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent; color:var(--text); font-family:var(--font); }
     body { display:grid; place-items:center; }
-    .panel { position:relative; width:min(var(--w), 100vw); background:var(--bg-rgba); border-radius:var(--r); padding:var(--p); box-shadow:0 18px 46px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.12); overflow:hidden; }
-    .panel.timer-only { width:min(var(--timer-w), 100vw); text-align:var(--timer-align); }
-    .panel.timer-only #timerBlock { margin:0 auto; }
-    .panel > :not(.decor) { position:relative; z-index:1; }
+    body.mode-goal #timerBlock { display:none !important; }
+    .panel { position:relative; width:min(var(--w), 100vw); min-height:var(--panel-h); background:var(--bg-rgba); border-radius:var(--r); padding:var(--p); box-shadow:0 18px 46px rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.12); overflow:visible; }
+    .panel.timer-only { width:min(calc(var(--timer-w) + var(--p) * 2), 100vw); text-align:var(--timer-align); }
+    .panel.timer-only .title { text-align:center; }
+    .panel.timer-only #timerBlock { justify-self:center; margin:0 auto; }
+    .grid.single #timerBlock { justify-self:center; margin-left:auto; margin-right:auto; }
+    .panel > :not(.decor) { position:relative; }
     .panel.no-bg { background:transparent; box-shadow:none; border-color:transparent; }
     .title { margin:0 0 14px; font-family:var(--header-font); font-size:var(--title); font-weight:900; }
     .grid { display:grid; gap:16px; grid-template-columns:1fr 1fr; }
@@ -10406,7 +11806,13 @@ public class DonConnectWidgetServer
     .goal-text .label { color:var(--text); font-family:var(--goal-title-font); font-size:var(--title); font-weight:950; line-height:1.02; text-transform:uppercase; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-bottom:2px; }
     .value { font-size:var(--value); font-weight:500; line-height:1.05; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .goal-text .value { font-family:var(--goal-value-font); }
-    #timerBlock { width:min(100%, var(--timer-w)); font-family:var(--timer-font); text-align:var(--timer-align); transform:translate(var(--timer-x), var(--timer-y)); }
+    #timerBlock { width:min(100%, var(--timer-w)); display:grid; justify-items:center; justify-content:center; align-content:center; margin-left:auto; margin-right:auto; font-family:var(--timer-font); text-align:var(--timer-align); transform:translate(var(--timer-x), var(--timer-y)); }
+    #timerBlock > * { width:100%; max-width:100%; justify-self:center; text-align:var(--timer-align); }
+    #timerTitle { font-family:var(--timer-title-font); }
+    #timerSubtitle { font-family:var(--timer-subtitle-font); min-height:1em; }
+    #timerValue { font-family:var(--timer-value-font); }
+    #timerMeta { font-family:var(--timer-meta-font); min-height:1em; }
+    #timerConversion { font-family:var(--timer-conversion-font); min-height:1em; }
     .meta { color:var(--muted); font-size:var(--meta); margin-top:8px; min-height:20px; }
     .bar { position:relative; width:var(--barl); max-width:100%; height:var(--barh); border-radius:var(--bar-r); background:var(--bar); opacity:var(--bar-op); overflow:hidden; align-self:var(--bar-self); }
     .bar.vertical { width:var(--barh); height:var(--barl); }
@@ -10428,52 +11834,66 @@ public class DonConnectWidgetServer
     .last, .services { color:var(--muted); font-size:var(--services-size); margin-top:14px; text-align:var(--services-align); }
     .services { font-family:var(--services-font); }
     .last { font-family:var(--last-font); font-size:var(--last-size); text-align:var(--last-align); }
+    .goal-deadline { position:absolute; left:50%; top:50%; min-width:240px; max-width:min(90vw, var(--w)); color:var(--text); font-family:var(--goal-deadline-font); font-size:var(--goal-deadline-size); text-align:var(--goal-deadline-align); margin:0; line-height:1.18; font-weight:800; pointer-events:none; }
+    .goal-deadline span { display:block; color:var(--muted); font-size:.72em; font-weight:900; text-transform:uppercase; }
+    .goal-deadline strong { display:block; font-size:1.35em; font-weight:950; font-variant-numeric:tabular-nums; }
+    .goal-deadline small { display:block; color:var(--muted); font-size:.72em; margin-top:3px; }
     .services-list { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; justify-content:var(--services-justify); }
     .service { color:var(--text); background:rgba(255,255,255,.12); border-radius:999px; padding:3px 7px; font-weight:800; }
     .services-list.dense { gap:3px; } .services-list.dense .service { padding:2px 5px; font-size:.82em; }
-    .decor { position:absolute; z-index:0; left:50%; top:50%; width:var(--decor-w); max-width:none; transform:translate(calc(-50% + var(--decor-x)), calc(-50% + var(--decor-y))); pointer-events:none; opacity:1; }
+    .decor { position:absolute; z-index:0; left:50%; top:50%; width:var(--decor-w); height:var(--decor-h); max-width:none; object-fit:contain; transform:translate(calc(-50% + var(--decor-x)), calc(-50% + var(--decor-y))); pointer-events:none; opacity:1; }
     .hidden { display:none; }
   </style>
 </head>
-<body>
-  <section class=""panel"">
+<body class=""" + bodyModeClass + @""">
+  <section class=""" + panelInitialClass + @""">
     <img class=""decor hidden"" id=""decorImage"" alt="""">
     <h1 class=""title"" id=""title"">DonConnect</h1>
-    <div class=""grid"" id=""grid""><article id=""goalBlock""><div class=""goal-card text-inside"" id=""goalCard""><div class=""goal-text"" id=""goalText""><div class=""label"" id=""goalTitle"">Goal</div><div class=""value"" id=""goalValue"">0 RUB</div></div><div class=""bar goal-bar"" id=""goalBar""><div class=""fill"" id=""goalFill""></div></div><div class=""goal-image hidden"" id=""goalImage""><div class=""image-base"" id=""goalImageBase""></div><div class=""image-fill"" id=""goalImageFill""></div></div></div><div class=""meta"" id=""goalMeta"">0%</div></article><article id=""timerBlock""><div class=""label"" id=""timerTitle"">Timer</div><div class=""meta"" id=""timerSubtitle""></div><div class=""value"" id=""timerValue"">00:00:00</div><div class=""meta"" id=""timerMeta""></div><div class=""meta"" id=""timerConversion""></div></article></div>
+    <div class=""" + gridInitialClass + @""" id=""grid""><article id=""goalBlock""" + goalInitialClass + @"><div class=""goal-card text-inside"" id=""goalCard""><div class=""goal-text"" id=""goalText""><div class=""label"" id=""goalTitle"">Goal</div><div class=""value"" id=""goalValue"">0 RUB</div></div><div class=""bar goal-bar"" id=""goalBar""><div class=""fill"" id=""goalFill""></div></div><div class=""goal-image hidden"" id=""goalImage""><div class=""image-base"" id=""goalImageBase""></div><div class=""image-fill"" id=""goalImageFill""></div></div></div><div class=""meta"" id=""goalMeta"">0%</div></article><article id=""timerBlock""" + timerInitialClass + @"><div class=""label"" id=""timerTitle"">Timer</div><div class=""meta"" id=""timerSubtitle""></div><div class=""value"" id=""timerValue"">00:00:00</div><div class=""meta"" id=""timerMeta""></div><div class=""meta"" id=""timerConversion""></div></article></div><div class=""goal-deadline hidden"" id=""goalDeadline""><span id=""goalDeadlineTitle""></span><strong id=""goalDeadlineValue""></strong><small id=""goalDeadlineDate""></small></div>
     <div class=""services"" id=""services""></div><div class=""last"" id=""last"" ></div>
   </section>
   <script>
-    const pageMode = '" + mode + @"';
+    const basePageMode = '" + mode + @"';
+    const requestedMode = new URLSearchParams(location.search).get('mode');
+    const pageMode = basePageMode === 'both' && ['goal','timer','both'].includes(requestedMode) ? requestedMode : basePageMode;
+    const preview = new URLSearchParams(location.search).has('preview');
     let settings = null;
     let state = null;
     boot();
     window.addEventListener('message', event => { if (event.data && event.data.type === 'overlay-settings') { settings = event.data.settings; applySettings(); render(); } });
     async function boot() { settings = await fetch('/donconnect/api/overlay-settings').then(r => r.json()).catch(() => null); applySettings(); await poll(); setInterval(poll, 800); }
     async function poll() { const data = await fetch('/donconnect/api/goal-state', { cache:'no-store' }).then(r => r.json()).catch(() => null); if (!data) return; state = data; if (!settings && data.settings) settings = data.settings; applySettings(); render(); }
-    function applySettings() { if (!settings) return; const root = document.documentElement.style; const barAlign = normalize(settings.GoalBarAlign, 'center', ['left','center','right']); const textAlign = normalize(settings.GoalTextAlign, 'center', ['left','center','right']); const servicesAlign = normalize(settings.ServicesTextAlign, 'center', ['left','center','right']); const lastAlign = normalize(settings.LastDonationTextAlign, 'center', ['left','center','right']); const bg = settings.BackgroundColor || '#10131a'; const bgOpacity = clamp(Number(settings.ContainerOpacity ?? settings.Opacity ?? .94), 0, 1); root.setProperty('--w', px(settings.Width)); root.setProperty('--r', px(settings.BorderRadius)); root.setProperty('--bar-r', px(settings.BarRadius ?? settings.BorderRadius)); root.setProperty('--p', px(settings.Padding)); root.setProperty('--title', px(settings.TitleSize)); root.setProperty('--value', px(settings.ValueSize)); root.setProperty('--label', px(settings.LabelSize)); root.setProperty('--meta', px(settings.MetaSize)); root.setProperty('--container-op', bgOpacity); root.setProperty('--bar-op', clamp(Number(settings.BarOpacity ?? 1), 0, 1)); root.setProperty('--bg', bg); root.setProperty('--bg-rgba', colorWithAlpha(bg, bgOpacity)); root.setProperty('--text', settings.TextColor || '#f8fbff'); root.setProperty('--muted', settings.MutedColor || '#b8c0cc'); root.setProperty('--accent', settings.AccentColor || '#7c3cff'); root.setProperty('--bar', settings.BarColor || '#1e2026'); root.setProperty('--barh', px(settings.GoalBarHeight || 74)); root.setProperty('--barl', px(settings.GoalBarLength || 520)); root.setProperty('--bar-self', barAlign === 'left' ? 'flex-start' : barAlign === 'right' ? 'flex-end' : 'center'); root.setProperty('--bar-justify', barAlign === 'left' ? 'start' : barAlign === 'right' ? 'end' : 'center'); root.setProperty('--goal-align', textAlign); root.setProperty('--goal-x', px(settings.GoalTextOffsetX || 0)); root.setProperty('--goal-y', px(settings.GoalTextOffsetY || 0)); root.setProperty('--services-align', servicesAlign); root.setProperty('--services-justify', servicesAlign === 'left' ? 'flex-start' : servicesAlign === 'right' ? 'flex-end' : 'center'); root.setProperty('--services-size', px(settings.ServicesFontSize || 14)); root.setProperty('--last-size', px(settings.LastDonationFontSize || 14)); root.setProperty('--last-align', lastAlign); root.setProperty('--image-fit', normalize(settings.GoalImageFit, 'contain', ['contain','cover'])); root.setProperty('--imagew', px(settings.GoalImageWidth || 520)); root.setProperty('--imageh', px(settings.GoalImageHeight || 160)); root.setProperty('--image-x', px(settings.GoalImageX || 0)); root.setProperty('--image-y', px(settings.GoalImageY || 0)); root.setProperty('--decor-x', px(settings.DecorImageX || 0)); root.setProperty('--decor-y', px(settings.DecorImageY || 0)); root.setProperty('--decor-w', px(settings.DecorImageWidth || 220)); root.setProperty('--font', fontStack(settings.FontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--header-font', fontStack(settings.GoalHeaderFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--goal-title-font', fontStack(settings.GoalTitleFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--goal-value-font', fontStack(settings.GoalValueFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--services-font', fontStack(settings.ServicesFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--last-font', fontStack(settings.LastDonationFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--timer-font', fontStack(settings.TimerFontFamily, 'Segoe UI, Arial, sans-serif')); applyGoalImage(); applyDecorImage(); applyElementTransforms(); }
-    function applyTimerSettings() { if (!settings) return; const root = document.documentElement.style; root.setProperty('--timer-x', px(settings.TimerX || 0)); root.setProperty('--timer-y', px(settings.TimerY || 0)); root.setProperty('--timer-w', px(settings.TimerWidth || 320)); root.setProperty('--timer-align', normalize(settings.TimerTextAlign, 'center', ['left','center','right'])); applyElementTransforms(); }
+    function applySettings() { if (!settings) return; const root = document.documentElement.style; const timerDecor = pageMode === 'timer'; const barAlign = normalize(settings.GoalBarAlign, 'center', ['left','center','right']); const textAlign = normalize(settings.GoalTextAlign, 'center', ['left','center','right']); const servicesAlign = normalize(settings.ServicesTextAlign, 'center', ['left','center','right']); const lastAlign = normalize(settings.LastDonationTextAlign, 'center', ['left','center','right']); const bg = settings.BackgroundColor || '#10131a'; const bgOpacity = clamp(Number(settings.ContainerOpacity ?? settings.Opacity ?? .94), 0, 1); const baseFont = fontStack(settings.FontFamily, 'Segoe UI, Arial, sans-serif'); const timerBaseFont = fontStack(settings.TimerFontFamily, baseFont); root.setProperty('--w', px(settings.Width)); root.setProperty('--panel-h', Number(settings.PanelHeight || 0) > 0 ? px(settings.PanelHeight) : 'auto'); root.setProperty('--r', px(settings.BorderRadius)); root.setProperty('--bar-r', px(settings.BarRadius ?? settings.BorderRadius)); root.setProperty('--p', px(settings.Padding)); root.setProperty('--title', px(settings.TitleSize)); root.setProperty('--value', px(settings.ValueSize)); root.setProperty('--label', px(settings.LabelSize)); root.setProperty('--meta', px(settings.MetaSize)); root.setProperty('--container-op', bgOpacity); root.setProperty('--bar-op', clamp(Number(settings.BarOpacity ?? 1), 0, 1)); root.setProperty('--bg', bg); root.setProperty('--bg-rgba', colorWithAlpha(bg, bgOpacity)); root.setProperty('--text', settings.TextColor || '#f8fbff'); root.setProperty('--muted', settings.MutedColor || '#b8c0cc'); root.setProperty('--accent', settings.AccentColor || '#7c3cff'); root.setProperty('--bar', settings.BarColor || '#1e2026'); root.setProperty('--barh', px(settings.GoalBarHeight || 74)); root.setProperty('--barl', px(settings.GoalBarLength || 520)); root.setProperty('--bar-self', barAlign === 'left' ? 'flex-start' : barAlign === 'right' ? 'flex-end' : 'center'); root.setProperty('--bar-justify', barAlign === 'left' ? 'start' : barAlign === 'right' ? 'end' : 'center'); root.setProperty('--goal-align', textAlign); root.setProperty('--goal-x', px(settings.GoalTextOffsetX || 0)); root.setProperty('--goal-y', px(settings.GoalTextOffsetY || 0)); root.setProperty('--services-align', servicesAlign); root.setProperty('--services-justify', servicesAlign === 'left' ? 'flex-start' : servicesAlign === 'right' ? 'flex-end' : 'center'); root.setProperty('--services-size', px(settings.ServicesFontSize || 14)); root.setProperty('--last-size', px(settings.LastDonationFontSize || 14)); root.setProperty('--last-align', lastAlign); root.setProperty('--goal-deadline-size', px(settings.GoalDeadlineFontSize || 18)); root.setProperty('--goal-deadline-align', normalize(settings.GoalDeadlineTextAlign, 'center', ['left','center','right'])); root.setProperty('--image-fit', normalize(settings.GoalImageFit, 'contain', ['contain','cover'])); root.setProperty('--imagew', px(settings.GoalImageWidth || 520)); root.setProperty('--imageh', px(settings.GoalImageHeight || 160)); root.setProperty('--image-x', px(settings.GoalImageX || 0)); root.setProperty('--image-y', px(settings.GoalImageY || 0)); root.setProperty('--decor-x', px((timerDecor ? settings.TimerDecorImageX : settings.DecorImageX) || 0)); root.setProperty('--decor-y', px((timerDecor ? settings.TimerDecorImageY : settings.DecorImageY) || 0)); root.setProperty('--decor-w', px((timerDecor ? settings.TimerDecorImageWidth : settings.DecorImageWidth) || 220)); root.setProperty('--decor-h', Number((timerDecor ? settings.TimerDecorImageHeight : settings.DecorImageHeight) || 0) > 0 ? px(timerDecor ? settings.TimerDecorImageHeight : settings.DecorImageHeight) : 'auto'); root.setProperty('--font', baseFont); root.setProperty('--header-font', fontStack(pageMode === 'timer' ? (settings.TimerHeaderFontFamily || settings.GoalHeaderFontFamily) : settings.GoalHeaderFontFamily, baseFont)); root.setProperty('--goal-title-font', fontStack(settings.GoalTitleFontFamily, baseFont)); root.setProperty('--goal-value-font', fontStack(settings.GoalValueFontFamily, baseFont)); root.setProperty('--services-font', fontStack(settings.ServicesFontFamily, baseFont)); root.setProperty('--last-font', fontStack(settings.LastDonationFontFamily, baseFont)); root.setProperty('--goal-deadline-font', fontStack(settings.GoalDeadlineFontFamily, baseFont)); root.setProperty('--timer-font', timerBaseFont); root.setProperty('--timer-title-font', fontStack(settings.TimerTitleFontFamily, timerBaseFont)); root.setProperty('--timer-subtitle-font', fontStack(settings.TimerSubtitleFontFamily, timerBaseFont)); root.setProperty('--timer-value-font', fontStack(settings.TimerValueFontFamily, timerBaseFont)); root.setProperty('--timer-meta-font', fontStack(settings.TimerMetaFontFamily, timerBaseFont)); root.setProperty('--timer-conversion-font', fontStack(settings.TimerConversionFontFamily, timerBaseFont)); applyGoalImage(); applyDecorImage(); applyElementTransforms(); applyLayerOrder(); }
+    function applyTimerSettings() { if (!settings) return; const root = document.documentElement.style; root.setProperty('--timer-x', px(settings.TimerX || 0)); root.setProperty('--timer-y', px(settings.TimerY || 0)); root.setProperty('--timer-w', px(settings.TimerWidth || 680)); root.setProperty('--timer-align', normalize(settings.TimerTextAlign, 'center', ['left','center','right'])); applyElementTransforms(); }
+    function applyLayerOrder() { if (!settings) return; const isTimer = pageMode === 'timer'; const defaults = isTimer ? ['background','decor','title','timerBlock','timerTitle','timerSubtitle','timerValue','timerMeta','timerConversion','services'] : ['background','decor','goalBar','goalImage','goalText','goalMeta','goalDeadline','services','last','title']; const order = normalizeLayerOrder(settings[isTimer ? 'TimerLayerOrder' : 'GoalLayerOrder'], defaults); const map = { decor:'decorImage', background:'' }; order.forEach((id, index) => { const elementId = map[id] == null ? id : map[id]; if (!elementId) return; const el = document.getElementById(elementId); if (el) el.style.zIndex = String(index + 1); }); }
+    function normalizeLayerOrder(value, defaults) { const result = []; (Array.isArray(value) ? value : []).forEach(id => { id = String(id || ''); if (defaults.includes(id) && !result.includes(id)) result.push(id); }); defaults.forEach(id => { if (!result.includes(id)) result.push(id); }); return result; }
     function applyElementBox(id, xKey, yKey, widthKey, heightKey, rotationKey, baseTransform) { const element = document.getElementById(id); if (!element || !settings) return; const width = Number(settings[widthKey] || 0), height = Number(settings[heightKey] || 0), x = Number(settings[xKey] || 0), y = Number(settings[yKey] || 0), rotation = Number(settings[rotationKey] || 0); element.style.width = width > 0 ? px(width) : ''; element.style.height = height > 0 ? px(height) : ''; element.style.transform = (baseTransform ? baseTransform + ' ' : '') + `translate(${x}px, ${y}px) rotate(${rotation}deg)`; element.style.transformOrigin = 'center'; }
-    function applyElementTransforms() { if (!settings) return; const verticalGoal = settings.GoalFillDirection === 'vertical'; applyElementBox('title','TitleX','TitleY','TitleWidth','TitleHeight','TitleRotation',''); applyElementBox('goalText','GoalTextOffsetX','GoalTextOffsetY','GoalTextWidth','GoalTextHeight','GoalTextRotation',''); applyElementBox('goalBar','GoalBarX','GoalBarY',verticalGoal ? 'GoalBarHeight' : 'GoalBarLength',verticalGoal ? 'GoalBarLength' : 'GoalBarHeight','GoalBarRotation',''); applyElementBox('goalImage','GoalImageX','GoalImageY','GoalImageWidth','GoalImageHeight','GoalImageRotation',''); applyElementBox('decorImage','DecorImageX','DecorImageY','DecorImageWidth','DecorImageHeight','DecorImageRotation','translate(-50%, -50%)'); applyElementBox('goalMeta','GoalMetaX','GoalMetaY','GoalMetaWidth','GoalMetaHeight','GoalMetaRotation',''); applyElementBox('services','ServicesX','ServicesY','ServicesWidth','ServicesHeight','ServicesRotation',''); applyElementBox('last','LastDonationX','LastDonationY','LastDonationWidth','LastDonationHeight','LastDonationRotation',''); applyElementBox('timerBlock','TimerX','TimerY','TimerWidth','TimerHeight','TimerRotation',''); applyElementBox('timerTitle','TimerTitleX','TimerTitleY','TimerTitleWidth','TimerTitleHeight','TimerTitleRotation',''); applyElementBox('timerSubtitle','TimerSubtitleX','TimerSubtitleY','TimerSubtitleWidth','TimerSubtitleHeight','TimerSubtitleRotation',''); applyElementBox('timerValue','TimerValueX','TimerValueY','TimerValueWidth','TimerValueHeight','TimerValueRotation',''); applyElementBox('timerMeta','TimerMetaX','TimerMetaY','TimerMetaWidth','TimerMetaHeight','TimerMetaRotation',''); applyElementBox('timerConversion','TimerConversionX','TimerConversionY','TimerConversionWidth','TimerConversionHeight','TimerConversionRotation',''); }
-    function render() { applyTimerSettings(); const data = state || {}; const goal = goalWithSettings(data.goal || {}); const timer = data.timer || {}; const mode = pageMode; const showGoal = mode === 'goal' || mode === 'both'; const showTimer = mode === 'timer' || mode === 'both'; const placement = normalize(settings && settings.GoalTextPlacement, 'inside', ['above','inside','below']); const visual = normalize(settings && settings.GoalBarVisualMode, 'bar', ['bar','image-reveal','image-silhouette','image-transparent','image-inverse']); const direction = normalize(settings && settings.GoalFillDirection, 'horizontal', ['horizontal','vertical']); const vertical = direction === 'vertical'; const progress = clamp(Number(goal.percent || 0), 0, 100); const panel = document.querySelector('.panel'); document.getElementById('grid').className = 'grid ' + (showGoal && showTimer ? '' : 'single'); document.getElementById('goalBlock').classList.toggle('hidden', !showGoal); document.getElementById('timerBlock').classList.toggle('hidden', !showTimer); document.getElementById('goalCard').className = 'goal-card text-' + placement + (vertical ? ' vertical' : ''); panel.classList.toggle('no-bg', !boolSetting('ShowPanelBackground', true)); panel.classList.toggle('timer-only', showTimer && !showGoal); document.getElementById('goalText').classList.toggle('hidden', !boolSetting('ShowGoalText', true)); const bar = document.getElementById('goalBar'); bar.classList.toggle('hidden', visual !== 'bar' || !boolSetting('ShowGoalBar', true)); bar.classList.toggle('no-progress', !boolSetting('ShowGoalProgress', true)); bar.classList.toggle('vertical', vertical); const imageBox = document.getElementById('goalImage'); if (imageBox) { imageBox.classList.toggle('no-progress', !boolSetting('ShowGoalProgress', true)); imageBox.classList.toggle('vertical', vertical); } const headerText = mode === 'timer' ? textSetting('TimerHeaderTitle', timer.headerTitle || '') : (mode === 'goal' || mode === 'both') ? textSetting('GoalHeaderTitle', goal.headerTitle || '') : ''; setVisibleText('title', headerText); setVisibleText('goalTitle', goal.title || ''); document.getElementById('goalValue').textContent = goalDisplay(goal); document.getElementById('goalValue').classList.toggle('hidden', !boolSetting('ShowGoalValue', true)); document.documentElement.style.setProperty('--pct', progress + '%'); const goalFill = document.getElementById('goalFill'); goalFill.style.width = vertical ? '100%' : progress + '%'; goalFill.style.height = vertical ? progress + '%' : '100%'; const showMeta = boolSetting('ShowGoalMeta', true) && placement !== 'inside' && boolSetting('ShowGoalText', true); const meta = document.getElementById('goalMeta'); meta.classList.toggle('hidden', !showMeta); meta.textContent = showMeta ? (goal.percentText || '0%') + (goal.targetText ? ' | ' + goal.targetText : '') : ''; setVisibleText('timerTitle', textSetting('TimerTitle', timer.title || '')); setVisibleText('timerSubtitle', textSetting('TimerSubtitle', timer.subtitle || '')); document.getElementById('timerValue').textContent = currentTimerText(timer); document.getElementById('timerMeta').textContent = Number(timer.addedSeconds || 0) > 0 ? '+' + (timer.addedText || '00:00:00') : ''; document.getElementById('timerConversion').textContent = boolSetting('TimerShowConversion', true) ? timerConversionText(timer) : ''; const last = document.getElementById('last'); last.textContent = showTimer && !showGoal ? '' : lastDonationText(data.lastDonation || {}); renderServices(data.services || [], !showTimer || showGoal || boolSetting('TimerShowServices', false)); applyGoalImage(); }
+    function applyElementTransforms() { if (!settings) return; const verticalGoal = settings.GoalFillDirection === 'vertical'; if (pageMode === 'timer') applyElementBox('title','TimerHeaderX','TimerHeaderY','TimerHeaderWidth','TimerHeaderHeight','TimerHeaderRotation',''); else applyElementBox('title','TitleX','TitleY','TitleWidth','TitleHeight','TitleRotation',''); applyElementBox('goalText','GoalTextOffsetX','GoalTextOffsetY','GoalTextWidth','GoalTextHeight','GoalTextRotation',''); applyElementBox('goalBar','GoalBarX','GoalBarY',verticalGoal ? 'GoalBarHeight' : 'GoalBarLength',verticalGoal ? 'GoalBarLength' : 'GoalBarHeight','GoalBarRotation',''); applyElementBox('goalImage','GoalImageX','GoalImageY','GoalImageWidth','GoalImageHeight','GoalImageRotation',''); if (pageMode === 'timer') applyElementBox('decorImage','TimerDecorImageX','TimerDecorImageY','TimerDecorImageWidth','TimerDecorImageHeight','TimerDecorImageRotation','translate(-50%, -50%)'); else applyElementBox('decorImage','DecorImageX','DecorImageY','DecorImageWidth','DecorImageHeight','DecorImageRotation','translate(-50%, -50%)'); applyElementBox('goalMeta','GoalMetaX','GoalMetaY','GoalMetaWidth','GoalMetaHeight','GoalMetaRotation',''); applyElementBox('goalDeadline','GoalDeadlineX','GoalDeadlineY','GoalDeadlineWidth','GoalDeadlineHeight','GoalDeadlineRotation','translate(-50%, -50%)'); applyElementBox('services','ServicesX','ServicesY','ServicesWidth','ServicesHeight','ServicesRotation',''); applyElementBox('last','LastDonationX','LastDonationY','LastDonationWidth','LastDonationHeight','LastDonationRotation',''); applyElementBox('timerBlock','TimerX','TimerY','TimerWidth','TimerHeight','TimerRotation',''); applyElementBox('timerTitle','TimerTitleX','TimerTitleY','TimerTitleWidth','TimerTitleHeight','TimerTitleRotation',''); applyElementBox('timerSubtitle','TimerSubtitleX','TimerSubtitleY','TimerSubtitleWidth','TimerSubtitleHeight','TimerSubtitleRotation',''); applyElementBox('timerValue','TimerValueX','TimerValueY','TimerValueWidth','TimerValueHeight','TimerValueRotation',''); applyElementBox('timerMeta','TimerMetaX','TimerMetaY','TimerMetaWidth','TimerMetaHeight','TimerMetaRotation',''); applyElementBox('timerConversion','TimerConversionX','TimerConversionY','TimerConversionWidth','TimerConversionHeight','TimerConversionRotation',''); }
+    function render() { applyTimerSettings(); const data = state || {}; const goal = goalWithSettings(data.goal || {}); const timer = data.timer || {}; const mode = pageMode; const showGoal = mode === 'goal' || mode === 'both'; const showTimer = (mode === 'timer' || mode === 'both') && boolSetting('TimerEnabled', false); const placement = normalize(settings && settings.GoalTextPlacement, 'inside', ['above','inside','below']); const visual = normalize(settings && settings.GoalBarVisualMode, 'bar', ['bar','image-reveal','image-silhouette','image-transparent','image-inverse']); const direction = normalize(settings && settings.GoalFillDirection, 'horizontal', ['horizontal','vertical']); const vertical = direction === 'vertical'; const progress = clamp(Number(goal.percent || 0), 0, 100); const panel = document.querySelector('.panel'); document.getElementById('grid').className = 'grid ' + (showGoal && showTimer ? '' : 'single'); document.getElementById('goalBlock').classList.toggle('hidden', !showGoal); document.getElementById('timerBlock').classList.toggle('hidden', !showTimer); document.getElementById('goalCard').className = 'goal-card text-' + placement + (vertical ? ' vertical' : ''); panel.classList.toggle('no-bg', !boolSetting('ShowPanelBackground', true)); panel.classList.toggle('timer-only', showTimer && !showGoal); document.getElementById('goalText').classList.toggle('hidden', !boolSetting('ShowGoalText', true)); const bar = document.getElementById('goalBar'); bar.classList.toggle('hidden', visual !== 'bar' || !boolSetting('ShowGoalBar', true)); bar.classList.toggle('no-progress', !boolSetting('ShowGoalProgress', true)); bar.classList.toggle('vertical', vertical); const imageBox = document.getElementById('goalImage'); if (imageBox) { imageBox.classList.toggle('no-progress', !boolSetting('ShowGoalProgress', true)); imageBox.classList.toggle('vertical', vertical); } const headerText = mode === 'timer' ? textSetting('TimerHeaderTitle', timer.headerTitle || '') : (mode === 'goal' || mode === 'both') ? textSetting('GoalHeaderTitle', goal.headerTitle || '') : ''; setVisibleText('title', headerText); setVisibleText('goalTitle', goal.title || ''); document.getElementById('goalValue').textContent = goalDisplay(goal); document.getElementById('goalValue').classList.toggle('hidden', !boolSetting('ShowGoalValue', true)); document.documentElement.style.setProperty('--pct', progress + '%'); const goalFill = document.getElementById('goalFill'); goalFill.style.width = vertical ? '100%' : progress + '%'; goalFill.style.height = vertical ? progress + '%' : '100%'; const showMeta = boolSetting('ShowGoalMeta', true) && placement !== 'inside' && boolSetting('ShowGoalText', true); const meta = document.getElementById('goalMeta'); meta.classList.toggle('hidden', !showMeta); meta.textContent = showMeta ? (goal.percentText || '0%') + (goal.targetText ? ' | ' + goal.targetText : '') : ''; setVisibleText('timerTitle', textSetting('TimerTitle', timer.title || '')); const timerSubtitle = document.getElementById('timerSubtitle'); timerSubtitle.textContent = textSetting('TimerSubtitle', timer.subtitle || ''); timerSubtitle.classList.toggle('hidden', !showTimer); document.getElementById('timerValue').textContent = currentTimerText(timer); document.getElementById('timerMeta').textContent = Number(timer.addedSeconds || 0) > 0 ? '+' + (timer.addedText || '00:00:00') : ''; const timerConversion = document.getElementById('timerConversion'); const showTimerConversion = showTimer && mode === 'timer' && boolSetting('TimerShowConversion', true); timerConversion.textContent = showTimerConversion ? timerConversionText(timer) : ''; timerConversion.classList.toggle('hidden', !showTimerConversion); const last = document.getElementById('last'); last.textContent = showTimer && !showGoal ? '' : lastDonationText(data.lastDonation || {}); last.classList.toggle('hidden', (showTimer && !showGoal) || !last.textContent.trim()); renderGoalDeadline(); renderServices(data.services || [], !showTimer || showGoal || boolSetting('TimerShowServices', false)); applyGoalImage(); }
     function goalWithSettings(goal) { const copy = Object.assign({}, goal || {}); if (settings) { copy.headerTitle = textSetting('GoalHeaderTitle', copy.headerTitle || ''); copy.title = textSetting('GoalTitle', copy.title || ''); if (copy.current == null) copy.current = textSetting('GoalCurrent', '0'); copy.target = textSetting('GoalTarget', copy.target || '0'); copy.currency = textSetting('GoalCurrency', copy.currency || ''); } const current = Number(copy.current || 0); const target = Number(copy.target || 0); const percent = target > 0 ? clamp((current / target) * 100, 0, 100) : 0; copy.percent = percent; copy.currentText = formatAmount(current, copy.currency); copy.targetText = target > 0 ? formatAmount(target, copy.currency) : ''; copy.percentText = percent.toFixed(percent % 1 ? 1 : 0) + '%'; copy.summary = copy.targetText ? copy.currentText + ' / ' + copy.targetText : copy.currentText; return copy; }
     function textSetting(key, fallback) { if (settings && Object.prototype.hasOwnProperty.call(settings, key)) return String(settings[key] ?? ''); return String(fallback ?? ''); }
     function boolSetting(key, fallback) { if (!settings || settings[key] == null) return fallback; return settings[key] === true || settings[key] === 'true'; }
     function setVisibleText(id, value) { const el = document.getElementById(id); const text = String(value ?? ''); el.textContent = text; el.classList.toggle('hidden', text.trim() === ''); }
     function lastDonationText(last) { if (!settings || settings.ShowLastDonation === false) return ''; const parts = []; const donor = last.donor || last.user || ''; const platform = last.source || last.platform || last.provider || ''; if (settings.ShowLastDonor !== false && donor) parts.push(donor); const amount = [last.amount, last.currency].filter(Boolean).join(' '); if (settings.ShowLastAmount !== false && amount) parts.push(amount); if (settings.ShowLastPlatform !== false && platform) parts.push(platform); return parts.join(' | '); }
+    function renderGoalDeadline() { const box = document.getElementById('goalDeadline'); if (!box || !settings) return; const enabled = boolSetting('GoalDeadlineEnabled', false) && (pageMode === 'goal' || pageMode === 'both'); const when = parseDeadline(settings.GoalDeadlineEndsAt); const remaining = when ? (when.getTime() - Date.now()) / 1000 : 0; const visible = enabled && when && remaining > 0; box.classList.toggle('hidden', !visible); if (!visible) return; setVisibleText('goalDeadlineTitle', textSetting('GoalDeadlineTitle', 'Сбор закончится через')); document.getElementById('goalDeadlineValue').textContent = formatDurationVerbose(remaining); document.getElementById('goalDeadlineDate').textContent = boolSetting('GoalDeadlineShowDate', true) ? formatDateTime(when) : ''; }
+    function parseDeadline(value) { const raw = String(value || '').trim(); if (!raw) return null; const parsed = Date.parse(raw); return Number.isFinite(parsed) ? new Date(parsed) : null; }
+    function formatDurationVerbose(total) { const seconds = Math.floor(Math.max(0, total)); const days = Math.floor(seconds / 86400); const h = Math.floor((seconds % 86400) / 3600); const m = Math.floor((seconds % 3600) / 60); const sec = seconds % 60; return (days > 0 ? days + 'd ' : '') + pad(h) + 'h ' + pad(m) + 'm ' + pad(sec) + 's'; }
+    function formatDateTime(date) { try { return date.toLocaleString(undefined, { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }); } catch (error) { return date.toLocaleString(); } }
     function applyGoalImage() { const box = document.getElementById('goalImage'); const base = document.getElementById('goalImageBase'); const fill = document.getElementById('goalImageFill'); if (!box || !base || !fill || !settings) return; const visual = normalize(settings.GoalBarVisualMode, 'bar', ['bar','image-reveal','image-silhouette','image-transparent','image-inverse']); const url = visual !== 'bar' && boolSetting('ShowGoalImage', false) ? String(settings.GoalImageDataUrl || '') : ''; const image = url ? `url(""${url.replace(/""/g, '%22')}"")` : ''; base.style.backgroundImage = image; fill.style.backgroundImage = image; box.classList.toggle('hidden', !url); box.classList.toggle('image-reveal', !!url && visual === 'image-reveal'); box.classList.toggle('image-silhouette', !!url && visual === 'image-silhouette'); box.classList.toggle('image-transparent', !!url && visual === 'image-transparent'); box.classList.toggle('image-inverse', !!url && visual === 'image-inverse'); }
-    function applyDecorImage() { const image = document.getElementById('decorImage'); if (!image) return; const url = boolSetting('ShowDecorImage', false) ? String(settings.DecorImageDataUrl || '') : ''; image.src = url || ''; image.classList.toggle('hidden', !url); }
+    function applyDecorImage() { const image = document.getElementById('decorImage'); if (!image) return; const timerDecor = pageMode === 'timer'; const url = boolSetting(timerDecor ? 'ShowTimerDecorImage' : 'ShowDecorImage', false) ? String(settings[timerDecor ? 'TimerDecorImageDataUrl' : 'DecorImageDataUrl'] || '') : ''; image.src = url || ''; image.classList.toggle('hidden', !url); }
     function colorWithAlpha(color, alpha) { const hex = String(color || '').trim(); const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex); if (!match) return hex || 'transparent'; let value = match[1]; if (value.length === 3) value = value.split('').map(ch => ch + ch).join(''); const r = parseInt(value.slice(0,2), 16); const g = parseInt(value.slice(2,4), 16); const b = parseInt(value.slice(4,6), 16); return `rgba(${r},${g},${b},${clamp(Number(alpha),0,1)})`; }
     function goalDisplay(goal) { const format = (settings && settings.GoalFormat || 'amount').toLowerCase(); if (format === 'percent') return goal.percentText || '0%'; if (format === 'summary') return goal.summary || goal.currentText || '0'; return goal.currentText || goal.summary || '0'; }
     function formatAmount(amount, currency) { const value = Number.isFinite(amount) ? amount : 0; const text = value.toLocaleString(undefined, { maximumFractionDigits:2 }); return [text, currency].filter(Boolean).join(' '); }
-    function renderServices(services, allowed) { const box = document.getElementById('services'); if (!allowed || !settings || !settings.ShowServices || !services.length) { box.innerHTML = ''; return; } const title = textSetting('ServicesTitle', 'Connected providers'); const heading = title.trim() ? '<div>' + escapeHtml(title) + '</div>' : ''; const short = name => ({'DonationAlerts':'DA','StreamElements':'SE','Streamlabs':'SL','DonatePay RU':'DP RU','DonatePay EU':'DP EU','Donate.Stream':'DS','deStream':'dS','DonateX.gg':'DX','ODA':'ODA','Generic API':'API'}[String(name)] || String(name)); box.innerHTML = heading + '<div class=""services-list ' + (services.length > 5 ? 'dense' : '') + '"">' + services.map(name => `<span class=""service"" title=""${escapeHtml(String(name))}"">${escapeHtml(short(name))}</span>`).join('') + '</div>'; }
+    function renderServices(services, allowed) { const box = document.getElementById('services'); const servicesEnabled = pageMode === 'timer' ? boolSetting('TimerShowServices', false) : boolSetting('ShowServices', true); const names = Array.isArray(services) && services.length ? services : (preview && pageMode === 'timer' ? ['DonationAlerts','DonatePay','DonateX.gg'] : []); if (!allowed || !settings || !servicesEnabled || !names.length) { box.innerHTML = ''; return; } const title = textSetting('ServicesTitle', 'Connected providers'); const heading = title.trim() ? '<div>' + escapeHtml(title) + '</div>' : ''; const short = name => ({'DonationAlerts':'DonationAlerts','StreamElements':'StreamElements','Streamlabs':'Streamlabs','DonatePay RU':'DonatePay','DonatePay EU':'DonatePay','Donate.Stream':'Donate.Stream','deStream':'deStream','DonateX.gg':'DonateX','ODA':'ODA','Generic API':'API'}[String(name)] || String(name)); box.innerHTML = heading + '<div class=""services-list ' + (names.length > 5 ? 'dense' : '') + '"">' + names.map(name => `<span class=""service"" title=""${escapeHtml(String(name))}"">${escapeHtml(short(name))}</span>`).join('') + '</div>'; }
     function currentTimerText(timer) { if (String(settings && settings.TimerMode || timer.mode || '') === 'countup-reset') { const startedAt = Date.parse(timer.startedAt || ''); return Number.isFinite(startedAt) ? formatDuration((Date.now() - startedAt) / 1000) : (timer.text || '00:00:00'); } const endsAt = Date.parse(timer.endsAt || ''); if (!Number.isFinite(endsAt)) return timer.text || '00:00:00'; return formatDuration(Math.max(0, (endsAt - Date.now()) / 1000)); }
     function timerConversionText(timer) { const amount = Number(settings && settings.TimerUnitAmount || 100); const seconds = Number(settings && settings.TimerSecondsPerUnit || 60); const currency = String(settings && settings.TimerCurrency || 'RUB'); const duration = seconds % 60 === 0 ? (seconds / 60) + ' min' : seconds + ' sec'; return amount + ' ' + currency + ' = ' + duration; }
     function formatDuration(total) { const seconds = Math.floor(Math.max(0, total)); const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); const s = seconds % 60; return `${pad(h)}:${pad(m)}:${pad(s)}`; }
     function pad(v) { return String(v).padStart(2, '0'); }
     function px(v) { return `${Number(v || 0)}px`; }
-    function fontStack(value, fallback) { const name = String(value || '').trim(); const safe = name.replace(/[""\\]/g, '').replace(/\s+/g, ' ').trim(); return safe ? '""' + safe + '"", ' + fallback : fallback; }
+    function fontStack(value, fallback) { const clean = name => String(name || '').replace(/[""\\\\]/g, '').replace(/\s+/g, ' ').trim(); const raw = String(value || '').trim(); if (!raw) return fallback; const generic = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace)$/i; const aliases = name => { const list = [name]; const compact = name.replace(/\s+/g, ''); if (compact && compact.toLowerCase() !== name.toLowerCase()) list.push(compact); const short = name.replace(/[\s_-]+(Regular|Book|Roman|Bold|Italic|Oblique|Medium|Light|Thin|Black|ExtraBold|SemiBold|DemiBold|ExtraLight|Heavy)$/i, '').trim(); if (short && short.toLowerCase() !== name.toLowerCase()) { list.push(short); const shortCompact = short.replace(/\s+/g, ''); if (shortCompact && shortCompact.toLowerCase() !== short.toLowerCase()) list.push(shortCompact); } return list; }; const seen = new Set(); const families = raw.split(',').map(clean).filter(Boolean).flatMap(aliases).filter(name => !seen.has(name.toLowerCase()) && seen.add(name.toLowerCase())); const css = families.map(name => generic.test(name) ? name : '""' + name + '""').join(', '); return css ? css + ', ' + fallback : fallback; }
     function clamp(v,min,max) { return Math.min(max, Math.max(min, Number.isFinite(v) ? v : min)); }
     function normalize(value, fallback, allowed) { value = String(value || '').toLowerCase(); return allowed.includes(value) ? value : fallback; }
+    function mediaUrl(file) { return '/donconnect/media/' + String(file || '').split('/').map(encodeURIComponent).join('/'); }
     function escapeHtml(value) { return String(value || '').replace(/[&<>'\x22]/g, ch => { const c = ch.charCodeAt(0); if (c === 38) return '&amp;'; if (c === 60) return '&lt;'; if (c === 62) return '&gt;'; if (c === 39) return '&#39;'; return '&quot;'; }); }
   </script>
 </body>
@@ -10489,39 +11909,54 @@ public class DonConnectWidgetServer
   <meta name=""viewport"" content=""width=device-width, initial-scale=1"">
   <title>DonConnect Leaderboard</title>
   <style>
-    :root { --w:560px; --p:18px; --r:16px; --fs:22px; --title:26px; --gap:8px; --op:.94; --align:left; --bg:#10131a; --text:#f8fbff; --muted:#b8c0cc; --accent:#7c3cff; --font:""Segoe UI"", Arial, sans-serif; --title-font:var(--font); --amount-font:var(--font); }
+" + LocalFontFaceCss() + @"
+    :root { --w:560px; --p:18px; --r:16px; --fs:22px; --title:26px; --gap:8px; --op:.94; --align:left; --bg:#10131a; --text:#f8fbff; --muted:#b8c0cc; --accent:#7c3cff; --decor-w:220px; --decor-h:160px; --decor-x:0px; --decor-y:0px; --decor-rot:0deg; --decor-fit:contain; --font:""Segoe UI"", Arial, sans-serif; --title-font:var(--font); --amount-font:var(--font); }
     * { box-sizing:border-box; }
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent; color:var(--text); font-family:var(--font); }
     body { display:grid; place-items:center; }
-    .board { width:min(var(--w), 100vw); padding:var(--p); border-radius:var(--r); background:var(--bg); opacity:var(--op); text-align:var(--align); border:1px solid rgba(255,255,255,.12); box-shadow:0 18px 46px rgba(0,0,0,.32); }
+    .board { position:relative; width:min(var(--w), 100vw); padding:var(--p); border-radius:var(--r); background:var(--bg); opacity:var(--op); text-align:var(--align); border:1px solid rgba(255,255,255,.12); box-shadow:0 18px 46px rgba(0,0,0,.32); overflow:visible; }
+    .decor-media { position:absolute; left:50%; top:50%; width:var(--decor-w); height:var(--decor-h); transform:translate(calc(-50% + var(--decor-x)), calc(-50% + var(--decor-y))) rotate(var(--decor-rot)); transform-origin:center; object-fit:var(--decor-fit); pointer-events:none; z-index:1; }
+    .board > :not(.decor-media) { position:relative; z-index:2; }
     h1 { margin:0 0 13px; color:var(--accent); font-family:var(--title-font); font-size:var(--title); line-height:1.05; }
     .platform { margin:0 0 10px; color:var(--muted); font-size:calc(var(--fs) * .72); font-weight:800; text-transform:uppercase; }
     ol { display:grid; gap:var(--gap); margin:0; padding:0; list-style:none; }
+    ol.lb-fade { animation:lbFade 720ms ease both; } ol.lb-slide { animation:lbSlide 720ms cubic-bezier(.2,.8,.2,1) both; }
+    @keyframes lbFade { from { opacity:0; } to { opacity:1; } } @keyframes lbSlide { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:translateY(0); } }
     li { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:10px; align-items:center; min-width:0; padding:7px 9px; border-radius:8px; background:rgba(255,255,255,.055); font-size:var(--fs); }
     .rank { min-width:24px; color:var(--accent); font-weight:900; }
     .name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:var(--align); font-weight:900; }
     .amount { color:var(--text); font-family:var(--amount-font); font-weight:900; white-space:nowrap; }
     .platforms { grid-column:2 / 4; margin-top:-6px; color:var(--muted); font-size:calc(var(--fs) * .58); font-weight:700; }
+    .board.align-center li { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; text-align:center; }
+    .board.align-center .rank { min-width:0; font-size:.8em; }
+    .board.align-center .name { max-width:100%; white-space:normal; text-align:center; }
+    .board.align-center .platforms { grid-column:auto; margin-top:0; text-align:center; }
+    .board.align-right li { text-align:right; }
+    .board.align-right .name { text-align:right; }
+    .board.align-right .platforms { grid-column:1 / 4; margin-top:-6px; text-align:right; }
     .hidden { display:none; }
   </style>
 </head>
 <body>
-  <section class=""board"" id=""board""><h1 id=""title"">Top donors</h1><div class=""platform hidden"" id=""platform""></div><ol id=""rows""></ol></section>
+  <section class=""board"" id=""board""><img class=""decor-media hidden"" id=""decorImage"" alt=""""><h1 id=""title"">Top donors</h1><div class=""platform hidden"" id=""platform""></div><ol id=""rows""></ol></section>
   <script>
     let settings = null;
     let state = null;
     let slideIndex = 0;
     let lastSlideAt = 0;
+    let lastRowsKey = '';
     boot();
     window.addEventListener('message', event => { if (event.data && event.data.type === 'leaderboard-settings') { settings = event.data.settings; applySettings(); render(); } });
     async function boot() { settings = await fetch('/donconnect/api/leaderboard-settings').then(r => r.json()).catch(() => null); applySettings(); await poll(); setInterval(poll, 1000); setInterval(render, 500); }
     async function poll() { const data = await fetch('/donconnect/api/leaderboard-state', { cache:'no-store' }).then(r => r.json()).catch(() => null); if (!data) return; state = data; if (!settings && data.settings) settings = data.settings; applySettings(); render(); }
-    function applySettings() { if (!settings) return; const root = document.documentElement.style; root.setProperty('--w', px(settings.Width || 560)); root.setProperty('--p', px(settings.Padding || 18)); root.setProperty('--r', px(settings.BorderRadius || 16)); root.setProperty('--fs', px(settings.FontSize || 22)); root.setProperty('--title', px(settings.TitleSize || 26)); root.setProperty('--gap', px(settings.RowGap || 8)); root.setProperty('--op', clamp(Number(String(settings.Opacity ?? .94).replace(',', '.')), 0, 1)); root.setProperty('--align', ['left','center','right'].includes(settings.TextAlign) ? settings.TextAlign : 'left'); root.setProperty('--bg', settings.BackgroundColor || '#10131a'); root.setProperty('--text', settings.TextColor || '#f8fbff'); root.setProperty('--muted', settings.MutedColor || '#b8c0cc'); root.setProperty('--accent', settings.AccentColor || '#7c3cff'); root.setProperty('--font', fontStack(settings.FontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--title-font', fontStack(settings.TitleFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--amount-font', fontStack(settings.AmountFontFamily, 'Segoe UI, Arial, sans-serif')); }
-    function render() { const data = state || {}; const mode = String(settings && settings.Mode || 'overall'); let rows = data.overall || []; let platform = ''; if (mode === 'recent') rows = data.recent || []; if (mode === 'platform-slides') { const slides = data.slides || []; const duration = Math.max(1000, Number(settings && settings.SlideDuration || 5000)); if (Date.now() - lastSlideAt >= duration) { slideIndex = slides.length ? (slideIndex + 1) % slides.length : 0; lastSlideAt = Date.now(); } const slide = slides[slideIndex] || {}; rows = slide.items || []; platform = slide.platform || ''; } const board = document.getElementById('board'); board.classList.toggle('hidden', settings && settings.Enabled === false); const title = document.getElementById('title'); title.textContent = String(settings && settings.Title || 'Top donors'); title.classList.toggle('hidden', settings && settings.ShowTitle === false); const platformNode = document.getElementById('platform'); platformNode.textContent = platform; platformNode.classList.toggle('hidden', !platform); document.getElementById('rows').innerHTML = rows.map(rowHtml).join(''); }
+    function applySettings() { if (!settings) return; const root = document.documentElement.style; root.setProperty('--w', px(settings.Width || 560)); root.setProperty('--p', px(settings.Padding || 18)); root.setProperty('--r', px(settings.BorderRadius || 16)); root.setProperty('--fs', px(settings.FontSize || 22)); root.setProperty('--title', px(settings.TitleSize || 26)); root.setProperty('--gap', px(settings.RowGap || 8)); root.setProperty('--op', clamp(Number(String(settings.Opacity ?? .94).replace(',', '.')), 0, 1)); root.setProperty('--align', ['left','center','right'].includes(settings.TextAlign) ? settings.TextAlign : 'left'); root.setProperty('--bg', settings.BackgroundColor || '#10131a'); root.setProperty('--text', settings.TextColor || '#f8fbff'); root.setProperty('--muted', settings.MutedColor || '#b8c0cc'); root.setProperty('--accent', settings.AccentColor || '#7c3cff'); root.setProperty('--font', fontStack(settings.FontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--title-font', fontStack(settings.TitleFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--amount-font', fontStack(settings.AmountFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--decor-w', px(settings.DecorImageWidth || 220)); root.setProperty('--decor-h', px(settings.DecorImageHeight || 160)); root.setProperty('--decor-x', px(settings.DecorImageX || 0)); root.setProperty('--decor-y', px(settings.DecorImageY || 0)); root.setProperty('--decor-rot', (Number(settings.DecorImageRotation || 0)) + 'deg'); root.setProperty('--decor-fit', settings.DecorImageFit === 'cover' ? 'cover' : 'contain'); renderDecor(); }
+    function render() { const data = state || {}; const mode = String(settings && settings.Mode || 'overall'); let rows = data.overall || []; let platform = ''; if (mode === 'month') rows = data.month || []; if (mode === 'week') rows = data.week || []; if (mode === 'stream') rows = data.stream || []; if (mode === 'recent') rows = data.recent || []; if (mode === 'platform-slides') { const slides = data.slides || []; const duration = Math.max(1000, Number(settings && settings.SlideDuration || 5000)); if (Date.now() - lastSlideAt >= duration) { slideIndex = slides.length ? (slideIndex + 1) % slides.length : 0; lastSlideAt = Date.now(); } const slide = slides[slideIndex] || {}; rows = slide.items || []; platform = slide.platform || ''; } const align = ['left','center','right'].includes(settings && settings.TextAlign) ? settings.TextAlign : 'left'; const board = document.getElementById('board'); board.classList.toggle('align-center', align === 'center'); board.classList.toggle('align-right', align === 'right'); board.classList.toggle('hidden', (settings && settings.Enabled === false) || ((settings && settings.ResetOnStart === true) && rows.length === 0)); const title = document.getElementById('title'); title.textContent = String(settings && settings.Title || 'Top donors'); title.classList.toggle('hidden', settings && settings.ShowTitle === false); const platformNode = document.getElementById('platform'); platformNode.textContent = platform; platformNode.classList.toggle('hidden', !platform || (settings && settings.ShowPlatforms === false)); const rowsNode = document.getElementById('rows'); const nextKey = mode + '|' + platform + '|' + rows.map(row => [row.rank,row.name,row.amount,row.currency].join(':')).join(';'); if (nextKey !== lastRowsKey) { rowsNode.classList.remove('lb-fade','lb-slide'); void rowsNode.offsetWidth; const animation = String(settings && settings.SlideAnimation || 'fade'); if (animation === 'fade') rowsNode.classList.add('lb-fade'); if (animation === 'slide') rowsNode.classList.add('lb-slide'); lastRowsKey = nextKey; } rowsNode.innerHTML = rows.map(rowHtml).join(''); }
+    function renderDecor() { const image = document.getElementById('decorImage'); if (!image || !settings) return; const file = String(settings.DecorImageFile || ''); image.classList.toggle('hidden', settings.ShowDecorImage === false || !file); if (!file) { image.removeAttribute('src'); return; } const url = mediaUrl(file); if (image.getAttribute('src') !== url) image.setAttribute('src', url); }
     function rowHtml(row) { const showRanks = !settings || settings.ShowRanks !== false; const showAmounts = !settings || settings.ShowAmounts !== false; const showPlatforms = !settings || settings.ShowPlatforms !== false; const platforms = Array.isArray(row.platforms) ? row.platforms.join(' + ') : ''; return `<li>${showRanks ? `<span class=""rank"">#${escapeHtml(row.rank || '')}</span>` : ''}<span class=""name"">${escapeHtml(row.name || 'Anonymous')}</span>${showAmounts ? `<span class=""amount"">${escapeHtml([row.amount, row.currency].filter(Boolean).join(' '))}</span>` : ''}${showPlatforms && platforms ? `<span class=""platforms"">${escapeHtml(platforms)}</span>` : ''}</li>`; }
     function px(value) { return `${Number(value || 0)}px`; }
     function clamp(v,min,max) { return Math.min(max, Math.max(min, Number.isFinite(v) ? v : min)); }
-    function fontStack(value, fallback) { const name = String(value || '').trim(); const safe = name.replace(/[""\\]/g, '').replace(/\s+/g, ' ').trim(); return safe ? '""' + safe + '"", ' + fallback : fallback; }
+    function fontStack(value, fallback) { const clean = name => String(name || '').replace(/[""\\\\]/g, '').replace(/\s+/g, ' ').trim(); const raw = String(value || '').trim(); if (!raw) return fallback; const generic = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace)$/i; const aliases = name => { const list = [name]; const compact = name.replace(/\s+/g, ''); if (compact && compact.toLowerCase() !== name.toLowerCase()) list.push(compact); const short = name.replace(/[\s_-]+(Regular|Book|Roman|Bold|Italic|Oblique|Medium|Light|Thin|Black|ExtraBold|SemiBold|DemiBold|ExtraLight|Heavy)$/i, '').trim(); if (short && short.toLowerCase() !== name.toLowerCase()) { list.push(short); const shortCompact = short.replace(/\s+/g, ''); if (shortCompact && shortCompact.toLowerCase() !== short.toLowerCase()) list.push(shortCompact); } return list; }; const seen = new Set(); const families = raw.split(',').map(clean).filter(Boolean).flatMap(aliases).filter(name => !seen.has(name.toLowerCase()) && seen.add(name.toLowerCase())); const css = families.map(name => generic.test(name) ? name : '""' + name + '""').join(', '); return css ? css + ', ' + fallback : fallback; }
+    function mediaUrl(file) { return '/donconnect/media/' + String(file || '').split('/').map(encodeURIComponent).join('/'); }
     function escapeHtml(value) { return String(value || '').replace(/[&<>'\x22]/g, ch => { const c = ch.charCodeAt(0); if (c === 38) return '&amp;'; if (c === 60) return '&lt;'; if (c === 62) return '&gt;'; if (c === 39) return '&#39;'; return '&quot;'; }); }
   </script>
 </body>
@@ -10555,6 +11990,8 @@ public class DonConnectWidgetServer
     .mini-text { margin-top:5px; color:#9aa8b8; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .timer-mini { display:flex; align-items:center; justify-content:space-between; gap:10px; color:#c8d3e0; font-size:12px; }
     .timer-mini strong { color:#eef4ff; font-size:16px; font-variant-numeric:tabular-nums; }
+    .credits-mini .mini-head { margin-bottom:0; }
+    .dock-actions { display:flex; align-items:center; justify-content:flex-end; gap:6px; flex-wrap:wrap; }
     .list { display:grid; gap:8px; padding:10px; }
     .item { display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center; padding:9px; border:1px solid #263241; border-radius:8px; background:#171f29; }
     .main { min-width:0; }
@@ -10571,7 +12008,7 @@ public class DonConnectWidgetServer
 <body>
   <header>
     <h1 id=""title"">DonConnect Dock</h1>
-    <button id=""refresh"" type=""button"">Refresh</button>
+    <div class=""dock-actions""><button id=""refresh"" type=""button"">Refresh</button><button id=""openLogs"" type=""button"">Open logs</button></div>
   </header>
   <section class=""summary"">
     <div class=""mini"">
@@ -10580,6 +12017,9 @@ public class DonConnectWidgetServer
       <div id=""goalMiniText"" class=""mini-text"">0 / 0</div>
     </div>
     <div class=""mini timer-mini""><span id=""timerMiniTitle"">Timer</span><strong id=""timerMiniText"">00:00:00</strong></div>
+    <div class=""mini credits-mini"">
+      <div class=""mini-head""><span id=""creditsMiniTitle"">Credits</span><button id=""resetCredits"" class=""tiny danger"" type=""button"">Reset credits</button></div>
+    </div>
   </section>
   <main id=""list"" class=""list""><div class=""empty"">No donations yet</div></main>
   <div id=""status"" class=""status""></div>
@@ -10588,14 +12028,16 @@ public class DonConnectWidgetServer
     const statusEl = document.getElementById('status');
     const refreshButton = document.getElementById('refresh');
     const resetGoalButton = document.getElementById('resetGoal');
+    const resetCreditsButton = document.getElementById('resetCredits');
+    const openLogsButton = document.getElementById('openLogs');
     const goalFill = document.getElementById('goalMiniFill');
     const goalText = document.getElementById('goalMiniText');
     const timerText = document.getElementById('timerMiniText');
     let latestState = null;
     const i18n = {
-      en:{ title:'DonConnect Dock', refresh:'Refresh', empty:'No donations yet', repeat:'Repeat', delete:'Delete', replayed:'Alert repeated without goal/timer/credits changes', deleted:'Donation removed from dock history', waiting:'Dock is waiting for DonConnect server', loading:'Refreshing...', goal:'Goal', timer:'Timer', resetGoal:'Reset', goalReset:'Goal reset' },
-      ru:{ title:'Док DonConnect', refresh:'Обновить', empty:'Донатов пока нет', repeat:'Повторить', delete:'Удалить', replayed:'Алёрт повторён без изменения цели, таймера и титров', deleted:'Донат удалён из истории дока', waiting:'Док ждёт сервер DonConnect', loading:'Обновляю...', goal:'Цель', timer:'Таймер', resetGoal:'Сброс', goalReset:'Цель сброшена' },
-      uk:{ title:'Док DonConnect', refresh:'Оновити', empty:'Донатів поки немає', repeat:'Повторити', delete:'Видалити', replayed:'Алерт повторено без зміни цілі, таймера й титрів', deleted:'Донат видалено з історії дока', waiting:'Док чекає сервер DonConnect', loading:'Оновлюю...', goal:'Ціль', timer:'Таймер', resetGoal:'Скинути', goalReset:'Ціль скинуто' }
+      en:{ title:'DonConnect Dock', refresh:'Refresh', empty:'No donations yet', repeat:'Repeat', delete:'Delete', replayed:'Alert repeated without goal/timer/credits changes', deleted:'Donation removed from dock history', waiting:'Dock is waiting for DonConnect server', loading:'Refreshing...', goal:'Goal', timer:'Timer', credits:'Credits', logs:'Donation logs', openLogs:'Open logs', logsOpened:'Donation log folder opened', resetGoal:'Reset', resetCredits:'Reset credits', goalReset:'Goal reset', creditsReset:'Credits reset', creditsResetFailed:'Credits were not reset. Enable Streamer.bot HTTP Server and try again.' },
+      ru:{ title:'Док DonConnect', refresh:'Обновить', empty:'Донатов пока нет', repeat:'Повторить', delete:'Удалить', replayed:'Алёрт повторён без изменения цели, таймера и титров', deleted:'Донат удалён из истории дока', waiting:'Док ждёт сервер DonConnect', loading:'Обновляю...', goal:'Цель', timer:'Таймер', credits:'Титры', logs:'Логи донатов', openLogs:'Открыть логи', logsOpened:'Папка логов донатов открыта', resetGoal:'Сброс', resetCredits:'Сбросить титры', goalReset:'Цель сброшена', creditsReset:'Титры сброшены', creditsResetFailed:'Титры не сброшены. Включите HTTP Server в Streamer.bot и попробуйте ещё раз.' },
+      uk:{ title:'Док DonConnect', refresh:'Оновити', empty:'Донатів поки немає', repeat:'Повторити', delete:'Видалити', replayed:'Алерт повторено без зміни цілі, таймера й титрів', deleted:'Донат видалено з історії дока', waiting:'Док чекає сервер DonConnect', loading:'Оновлюю...', goal:'Ціль', timer:'Таймер', credits:'Титри', logs:'Логи донатів', openLogs:'Відкрити логи', logsOpened:'Папку логів донатів відкрито', resetGoal:'Скинути', resetCredits:'Скинути титри', goalReset:'Ціль скинуто', creditsReset:'Титри скинуто', creditsResetFailed:'Титри не скинуто. Увімкніть HTTP Server у Streamer.bot і спробуйте ще раз.' }
     };
     const lang = normalizeLanguage(localStorage.getItem('donconnectEditorLanguage') || navigator.language || 'en');
     const t = key => (i18n[lang] && i18n[lang][key]) || i18n.en[key] || key;
@@ -10603,10 +12045,15 @@ public class DonConnectWidgetServer
     document.getElementById('title').textContent = t('title');
     document.getElementById('goalMiniTitle').textContent = t('goal');
     document.getElementById('timerMiniTitle').textContent = t('timer');
+    document.getElementById('creditsMiniTitle').textContent = t('credits');
     refreshButton.textContent = t('refresh');
     resetGoalButton.textContent = t('resetGoal');
+    resetCreditsButton.textContent = t('resetCredits');
+    openLogsButton.textContent = t('openLogs');
     refreshButton.addEventListener('click', () => load(true));
     resetGoalButton.addEventListener('click', resetGoal);
+    resetCreditsButton.addEventListener('click', resetCredits);
+    openLogsButton.addEventListener('click', openDonationLogs);
     function normalizeLanguage(value) { const text = String(value || '').toLowerCase(); if (text.startsWith('ru')) return 'ru'; if (text.startsWith('uk') || text.startsWith('ua')) return 'uk'; return 'en'; }
     async function json(url, options) {
       const response = await fetch(url, options || {});
@@ -10644,6 +12091,24 @@ public class DonConnectWidgetServer
       renderSummary(state);
       statusEl.textContent = t('goalReset');
       setTimeout(() => statusEl.textContent = '', 2500);
+    }
+    async function resetCredits() {
+      try {
+        const result = await json('/donconnect/api/credits-reset', { method:'POST' });
+        statusEl.textContent = result && result.ok ? t('creditsReset') : t('creditsResetFailed');
+      } catch (error) {
+        statusEl.textContent = t('creditsResetFailed');
+      }
+      setTimeout(() => statusEl.textContent = '', 4500);
+    }
+    async function openDonationLogs() {
+      try {
+        const result = await json('/donconnect/api/donation-logs-open', { method:'POST' });
+        statusEl.textContent = result && result.directory ? result.directory : t('logsOpened');
+      } catch (error) {
+        statusEl.textContent = error && error.message ? error.message : String(error);
+      }
+      setTimeout(() => statusEl.textContent = '', 5000);
     }
     async function replay(id) {
       await json('/donconnect/api/replay-donation', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id }) });
@@ -10705,19 +12170,20 @@ public class DonConnectWidgetServer
   <meta name=""viewport"" content=""width=device-width, initial-scale=1"">
   <title>DonConnect Credits</title>
   <style>
-    :root { --bg:transparent; --text:#f7f4ec; --muted:#b9d8d2; --accent:#ffcf5a; --shadow:rgba(0,0,0,.7); --duration:70s; --w:920px; --fs:42px; --font:""Segoe UI"", Arial, sans-serif; --title-font:var(--font); --detail-font:var(--font); }
+" + LocalFontFaceCss() + @"
+    :root { --bg:transparent; --text:#f7f4ec; --muted:#b9d8d2; --accent:#ffcf5a; --shadow:rgba(0,0,0,.7); --duration:70s; --w:920px; --fs:42px; --font:""Segoe UI"", Arial, sans-serif; --title-font:var(--font); --section-font:var(--font); --detail-font:var(--font); }
     * { box-sizing:border-box; }
     html, body { margin:0; width:100%; height:100%; overflow:hidden; background:var(--bg); color:var(--text); font-family:var(--font); }
     body { display:grid; place-items:center; }
     .stage { position:relative; width:min(100vw, var(--w)); height:100vh; overflow:hidden; mask-image:linear-gradient(to bottom, transparent 0%, black 14%, black 86%, transparent 100%); }
-    .credits { position:absolute; left:50%; top:100%; width:min(90vw, var(--w)); transform:translateX(-50%); text-align:center; animation:roll var(--duration) linear infinite; text-shadow:0 3px 18px var(--shadow); }
+    .credits { position:absolute; left:50%; top:100%; width:min(90vw, var(--w)); transform:translate3d(-50%, 0, 0); text-align:center; animation:roll var(--duration) linear infinite; text-shadow:0 3px 18px var(--shadow); will-change:transform; backface-visibility:hidden; }
     .credits.paused { animation-play-state:paused; }
-    @keyframes roll { from { transform:translate(-50%, 0); } to { transform:translate(-50%, calc(-100% - 110vh)); } }
+    @keyframes roll { from { transform:translate3d(-50%, 0, 0); } to { transform:translate3d(-50%, calc(-100% - 110vh), 0); } }
     .intro { min-height:30vh; display:grid; align-content:end; gap:18px; padding-bottom:64px; }
     h1 { margin:0; color:var(--accent); font-family:var(--title-font); font-size:calc(var(--fs) * 1.55); line-height:1; font-weight:900; }
     .intro p, .outro, .empty { margin:0; color:var(--muted); font-size:calc(var(--fs) * .72); font-weight:700; line-height:1.35; }
     .section { margin:0 0 54px; }
-    .section h2 { margin:0 0 18px; color:var(--accent); font-size:calc(var(--fs) * .92); text-transform:uppercase; }
+    .section h2 { margin:0 0 18px; color:var(--accent); font-family:var(--section-font); font-size:calc(var(--fs) * .92); text-transform:uppercase; }
     .names { display:grid; gap:10px; margin:0; padding:0; list-style:none; font-size:var(--fs); line-height:1.18; font-weight:800; }
     .detail { display:block; color:var(--muted); font-family:var(--detail-font); font-size:.58em; font-weight:700; margin-top:4px; }
     .outro { min-height:60vh; display:grid; align-content:start; padding-top:30px; }
@@ -10731,24 +12197,43 @@ public class DonConnectWidgetServer
     let paused = false;
     let polling = false;
     let lastMarkup = '';
+    let rollStartedAt = performance.now();
+    let currentDuration = 0;
+    let pausedAt = 0;
     boot();
     window.addEventListener('message', event => { if (event.data && event.data.type === 'credits-settings') { settings = event.data.settings; applySettings(); render(); } if (event.data && event.data.type === 'credits-control') applyControl(event.data.action); });
     async function boot() { settings = await fetch('/donconnect/api/credits-settings').then(r => r.json()).catch(() => null); applySettings(); await poll(); setInterval(poll, 1500); }
     async function poll() { if (polling) return; polling = true; try { const data = await fetch('/donconnect/api/credits-state', { cache:'no-store' }).then(r => r.json()).catch(() => null); if (!data) return; state = data; render(); } finally { polling = false; } }
-    function applySettings() { if (!settings) return; const root = document.documentElement.style; root.setProperty('--bg', settings.TransparentBackground === false ? (settings.BackgroundColor || '#000000') : 'transparent'); root.setProperty('--text', settings.TextColor || '#f7f4ec'); root.setProperty('--muted', settings.MutedColor || '#b9d8d2'); root.setProperty('--accent', settings.AccentColor || '#ffcf5a'); root.setProperty('--w', px(settings.Width || 920)); root.setProperty('--fs', px(settings.FontSize || 42)); root.setProperty('--font', fontStack(settings.FontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--title-font', fontStack(settings.TitleFontFamily, 'Segoe UI, Arial, sans-serif')); root.setProperty('--detail-font', fontStack(settings.DetailFontFamily, 'Segoe UI, Arial, sans-serif')); }
-    function render() { const sections = state && state.native ? nativeSections(state.native) : []; const donations = state && Array.isArray(state.items) ? state.items : []; if (donations.length) sections.push({ title:(settings && settings.SectionTitle) || 'Donations', items:donations, kind:'donconnect' }); const count = sections.reduce((sum, item) => sum + item.items.length, 0); const chars = sections.reduce((sum, group) => sum + group.items.reduce((itemSum, item) => itemSum + String(item.name || '').length + String(item.message || '').length, 0), 0); const duration = Math.max(45, Math.min(360, 24 + sections.length * 4 + count * 3.2 + chars * .025)); document.documentElement.style.setProperty('--duration', duration.toFixed(1) + 's'); const body = sections.length ? sections.map(section).join('') : '<p class=""empty"">No credits yet</p>'; const title = settings && Object.prototype.hasOwnProperty.call(settings, 'Title') ? settings.Title : 'Thanks for watching'; const subtitle = settings && Object.prototype.hasOwnProperty.call(settings, 'Subtitle') ? settings.Subtitle : 'Today with us'; const outro = settings && Object.prototype.hasOwnProperty.call(settings, 'Outro') ? settings.Outro : 'See you next stream'; const html = [`<header class=""intro""><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></header>`, body, `<footer class=""outro"">${escapeHtml(outro)}</footer>`].join(''); const el = document.getElementById('credits'); if (html !== lastMarkup) { el.innerHTML = html; lastMarkup = html; } el.classList.toggle('paused', paused); }
-    function section(group) { const items = group.items || []; if (!items.length) return ''; const isDonConnect = group.kind === 'donconnect'; const showNames = !isDonConnect || !settings || settings.ShowNames !== false; return '<section class=""section""><h2>' + escapeHtml(group.title || 'Credits') + '</h2><ul class=""names"">' + items.map(item => { const details = detail(item, isDonConnect); const name = showNames ? escapeHtml(item.name || 'Anonymous') : ''; return `<li>${name}${details ? `<span class=""detail"">${escapeHtml(details)}</span>` : ''}</li>`; }).join('') + '</ul></section>'; }
+    function applySettings() { if (!settings) return; const root = document.documentElement.style; const baseFont = fontStack(settings.FontFamily, 'Segoe UI, Arial, sans-serif'); root.setProperty('--bg', settings.TransparentBackground === false ? (settings.BackgroundColor || '#000000') : 'transparent'); root.setProperty('--text', settings.TextColor || '#f7f4ec'); root.setProperty('--muted', settings.MutedColor || '#b9d8d2'); root.setProperty('--accent', settings.AccentColor || '#ffcf5a'); root.setProperty('--w', px(settings.Width || 920)); root.setProperty('--fs', px(settings.FontSize || 42)); root.setProperty('--font', baseFont); root.setProperty('--title-font', fontStack(settings.TitleFontFamily, baseFont)); root.setProperty('--section-font', fontStack(settings.SectionTitleFontFamily, baseFont)); root.setProperty('--detail-font', fontStack(settings.DetailFontFamily, baseFont)); }
+    function render() { const sections = state && state.native ? nativeSections(state.native) : []; const donations = state && Array.isArray(state.items) ? state.items.map(donconnectItem).filter(Boolean) : []; const donationTitle = (settings && settings.SectionTitle) || 'Donations'; if (donations.length && !hasDonationSection(sections, donationTitle)) sections.push({ title:donationTitle, items:donations, kind:'donconnect' }); const count = sections.reduce((sum, item) => sum + item.items.length, 0); const chars = sections.reduce((sum, group) => sum + group.items.reduce((itemSum, item) => itemSum + String(displayName(item)).length + String(item.message || '').length, 0), 0); const body = sections.length ? sections.map(section).join('') : '<p class=""empty"">No credits yet</p>'; const title = settings && Object.prototype.hasOwnProperty.call(settings, 'Title') ? settings.Title : 'Thanks for watching'; const subtitle = settings && Object.prototype.hasOwnProperty.call(settings, 'Subtitle') ? settings.Subtitle : 'Today with us'; const outro = settings && Object.prototype.hasOwnProperty.call(settings, 'Outro') ? settings.Outro : 'See you next stream'; const html = [`<header class=""intro""><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></header>`, body, `<footer class=""outro"">${escapeHtml(outro)}</footer>`].join(''); const el = document.getElementById('credits'); const changed = html !== lastMarkup; const progress = changed ? rollProgress() : 0; if (changed) { el.innerHTML = html; lastMarkup = html; } setRollDuration(creditsDuration(sections, count, chars)); if (changed) applyRollDelay(progress); el.classList.toggle('paused', paused); }
+    function creditsDuration(sections, count, chars) { const speed = Math.max(10, Math.min(600, Number(settings && settings.DurationSeconds || parseDuration(settings && settings.Duration, 180) || 180))); const el = document.getElementById('credits'); const distance = Math.max(window.innerHeight * 1.8, (el ? el.scrollHeight : 0) + window.innerHeight * 1.1); if (settings && settings.LockDuration === true) return Math.max(8, Math.min(900, distance / speed)); const base = Math.max(8, Math.min(180, 4800 / speed)); const complexity = Math.min(28, sections.length * 1.5 + count * .35 + chars * .002); return Math.max(8, Math.min(220, base + complexity)); }
+    function section(group) { const items = group.items || []; if (!items.length) return ''; const title = group.title || 'Credits'; const isDonConnect = group.kind === 'donconnect'; const showNames = !isDonConnect || !settings || settings.ShowNames !== false; return '<section class=""section""><h2 style=""font-family:' + escapeHtml(sectionFont(title)) + '"">' + escapeHtml(sectionLabel(title)) + '</h2><ul class=""names"">' + items.map(item => { const details = detail(item, isDonConnect); const name = showNames ? escapeHtml(displayName(item) || 'Anonymous') : ''; return `<li>${name}${details ? `<span class=""detail"">${escapeHtml(details)}</span>` : ''}</li>`; }).join('') + '</ul></section>'; }
     function nativeSections(data) { const result = []; const events = data.Events || data.events || {}; const users = data.User || data.Users || data.user || data.users || {}; const hype = data.HypeTrain || data.hypeTrain || {}; const top = data.Top || data.top || {}; addNativeSection(result, 'Follows', firstArray(events.Follows, events.follows)); addNativeSection(result, 'Cheers', firstArray(events.Cheers, events.cheers)); addNativeSection(result, 'Subs', firstArray(events.Subs, events.subs)); addNativeSection(result, 'ReSubs', firstArray(events.ReSubs, events.ReSub, events.resubs, events.reSubs)); addNativeSection(result, 'Gift Subs', firstArray(events.GiftSubs, events.giftsubs, events.giftSubs)); addNativeSection(result, 'Gift Bombs', firstArray(events.GiftBombs, events.giftbombs, events.giftBombs)); addNativeSection(result, 'Raids', firstArray(events.Raided, events.Raids, events.raided, events.raids)); addNativeSection(result, 'Reward Redemptions', firstArray(events.RewardRedemptions, events.rewardredemptions, events.rewardRedemptions)); addNativeSection(result, 'Goal Contributions', firstArray(events.GoalContributions, events.goalcontributions, events.goalContributions)); addNativeSection(result, 'Game Updates', firstArray(events.GameUpdates, events.gameupdates, events.gameUpdates)); addNativeSection(result, 'Pyramids', firstArray(events.Pyramids, events.pyramids)); addNativeSection(result, 'Hype Trains', firstArray(events.HypeTrains, events.hypetrains, events.hypeTrains)); addNativeSection(result, 'Hype Train Conductors', firstArray(data.HypeTrainConductor, data.hypeTrainConductors, hype.Conductors, hype.conductors)); addNativeSection(result, 'Hype Train Contributors', firstArray(data.HypeTrainContributors, data.hypeTrainContributors, hype.Contributors, hype.contributors)); addNativeSection(result, 'Editors', firstArray(users.Editors, users.editors)); addNativeSection(result, 'Moderators', firstArray(users.Moderator, users.Moderators, users.moderator, users.moderators)); addNativeSection(result, 'Subscribers', firstArray(users.Subscriber, users.Subscribers, users.subscriber, users.subscribers)); addNativeSection(result, 'VIPs', firstArray(users.VIPs, users.Vips, users.vips)); addNativeSection(result, 'Users', firstArray(users.Users, users.users, users.regulars)); addNativeObjectSections(result, data.Groups || data.groups, 'Groups'); addNativeSection(result, 'All Bits', firstArray(data.TopBits && data.TopBits.All, top.allBits, top.AllBits)); addNativeSection(result, 'Month Bits', firstArray(data.TopBits && data.TopBits.Month, top.monthBits, top.MonthBits)); addNativeSection(result, 'Week Bits', firstArray(data.TopBits && data.TopBits.Week, top.weekBits, top.WeekBits)); addNativeSection(result, 'Channel Rewards', firstArray(data.TopChannelRewards, top.channelRewards, top.ChannelRewards)); addNativeObjectSections(result, data.Custom || data.custom, 'Custom'); return result; }
+    function hasDonationSection(sections, preferredTitle) { const titles = new Set([preferredTitle, 'Donations', 'Donation', 'DonConnect donations', 'Донаты', 'Донаты DonConnect', 'Донати', 'Донати DonConnect'].map(normalizeTitle)); return sections.some(group => titles.has(normalizeTitle(group.title))); }
+    function normalizeTitle(value) { return String(value || '').trim().toLowerCase().replace(/\s+/g, ' '); }
+    function parseDuration(value, fallback) { const match = String(value || '').match(/[\d.]+/); return match ? Number(match[0]) : fallback; }
     function firstArray(...values) { return values.find(Array.isArray) || []; }
     function addNativeSection(result, title, values) { const items = (Array.isArray(values) ? values : []).map(nativeItem).filter(Boolean); if (items.length) result.push({ title, items }); }
     function addNativeObjectSections(result, source, fallbackTitle) { if (!source || typeof source !== 'object') return; if (Array.isArray(source)) { addNativeSection(result, fallbackTitle, source); return; } Object.entries(source).forEach(([key, value]) => { if (Array.isArray(value)) addNativeSection(result, prettyTitle(key), value); }); }
-    function nativeItem(value) { if (value == null) return null; if (typeof value !== 'object') return { name:String(value) }; const name = value.name || value.user || value.userName || value.username || value.displayName || value.login || value.title || 'Viewer'; const parts = []; ['amount','currency','message','count','bits','tier','viewers'].forEach(key => { if (value[key] != null && String(value[key]).trim()) parts.push(String(value[key])); }); return { name:String(name), message:parts.join(' | ') }; }
+    function nativeItem(value) { if (value == null) return null; if (typeof value !== 'object') return { name:String(value) }; const name = displayName(value) || 'Viewer'; const parts = []; ['amount','currency','message','platform','provider','source','count','bits','tier','viewers'].forEach(key => { if (value[key] != null && String(value[key]).trim()) parts.push(String(value[key])); }); return { name:String(name), message:parts.join(' | ') }; }
+    function donconnectItem(value) { if (value == null) return null; if (typeof value !== 'object') return { name:String(value), message:'' }; return { name:displayName(value) || 'Anonymous', amount:value.amount, currency:value.currency, platform:value.platform || value.provider || value.source, message:value.message || '' }; }
+    function displayName(value) { return firstText(value && value.name, value && value.donorName, value && value.donor, value && value.user, value && value.userName, value && value.username, value && value.displayName, value && value.login, value && value.donationUser, value && value.nick, value && value.nickname, value && value.title); }
+    function firstText(...values) { const found = values.find(value => value != null && String(value).trim()); return found == null ? '' : String(found).trim(); }
+    function sectionLabel(title) { const raw = String(title || 'Credits'); const labels = parseSectionLabels(settings && settings.SectionLabels); const keys = [raw, raw.replace(/\s+/g, ''), normalizeTitle(raw)]; for (const key of keys) { if (labels[key]) return labels[key]; } return raw; }
+    function sectionFont(title) { const raw = String(title || 'Credits'); const fonts = parseSectionLabels(settings && settings.SectionFonts); const keys = [raw, raw.replace(/\s+/g, ''), normalizeTitle(raw)]; const base = fontStack(settings && settings.FontFamily, 'Segoe UI, Arial, sans-serif'); const fallback = fontStack(settings && settings.SectionTitleFontFamily, base); for (const key of keys) { if (fonts[key]) return fontStack(fonts[key], fallback); } return fallback; }
+    function parseSectionLabels(value) { const result = {}; String(value || '').split(/[;\n]/).forEach(row => { const index = row.indexOf('='); if (index < 1) return; const key = row.slice(0, index).trim(); const label = row.slice(index + 1).trim(); if (!key || !label) return; result[key] = label; result[key.replace(/\s+/g, '')] = label; result[normalizeTitle(key)] = label; }); return result; }
     function prettyTitle(value) { return String(value || 'Credits').replace(/([a-z])([A-Z])/g, '$1 $2'); }
-    function applyControl(action) { if (action === 'pause') paused = true; if (action === 'resume') paused = false; if (action === 'restart') restartRoll(); if (action === 'refresh') poll().then(restartRoll); const el = document.getElementById('credits'); if (el) el.classList.toggle('paused', paused); }
-    function restartRoll() { const el = document.getElementById('credits'); if (!el) return; el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; el.classList.toggle('paused', paused); }
+    function applyControl(action) { if (action === 'pause') setPaused(true); if (action === 'resume') setPaused(false); if (action === 'restart') restartRoll(); if (action === 'refresh') poll().then(restartRoll); const el = document.getElementById('credits'); if (el) el.classList.toggle('paused', paused); }
+    function setPaused(value) { if (paused === value) return; if (value) pausedAt = performance.now(); else if (pausedAt) { rollStartedAt += performance.now() - pausedAt; pausedAt = 0; } paused = value; }
+    function rollNow() { return paused && pausedAt ? pausedAt : performance.now(); }
+    function rollProgress() { const duration = Math.max(.1, currentDuration || 70); return (((rollNow() - rollStartedAt) / 1000) % duration) / duration; }
+    function applyRollDelay(progress) { const el = document.getElementById('credits'); if (el) el.style.animationDelay = (-Math.max(0, Math.min(1, progress)) * currentDuration).toFixed(2) + 's'; }
+    function setRollDuration(seconds) { const next = Math.max(5, Math.min(900, Number(seconds) || 70)); if (currentDuration > 0 && Math.abs(next - currentDuration) < .05) return; const progress = currentDuration > 0 ? rollProgress() : 0; currentDuration = next; rollStartedAt = rollNow() - progress * currentDuration * 1000; document.documentElement.style.setProperty('--duration', currentDuration.toFixed(1) + 's'); applyRollDelay(progress); }
+    function restartRoll() { const el = document.getElementById('credits'); if (!el) return; rollStartedAt = performance.now(); pausedAt = paused ? rollStartedAt : 0; el.style.animationDelay = '0s'; el.style.animation = 'none'; void el.offsetWidth; el.style.animation = ''; el.classList.toggle('paused', paused); }
     function detail(item, isDonConnect) { if (!isDonConnect) return item.message || ''; const parts = []; if ((!settings || settings.ShowAmounts !== false) && item.amount) parts.push([item.amount, item.currency].filter(Boolean).join(' ')); if ((!settings || settings.ShowPlatforms !== false) && item.platform) parts.push(item.platform); if ((!settings || settings.ShowMessages !== false) && item.message) parts.push(item.message); return parts.join(' | '); }
     function px(v) { return `${Number(v || 0)}px`; }
-    function fontStack(value, fallback) { const name = String(value || '').trim(); const safe = name.replace(/[""\\]/g, '').replace(/\s+/g, ' ').trim(); return safe ? '""' + safe + '"", ' + fallback : fallback; }
+    function fontStack(value, fallback) { const clean = name => String(name || '').replace(/[""\\\\]/g, '').replace(/\s+/g, ' ').trim(); const raw = String(value || '').trim(); if (!raw) return fallback; const generic = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-serif|ui-sans-serif|ui-monospace)$/i; const aliases = name => { const list = [name]; const compact = name.replace(/\s+/g, ''); if (compact && compact.toLowerCase() !== name.toLowerCase()) list.push(compact); const short = name.replace(/[\s_-]+(Regular|Book|Roman|Bold|Italic|Oblique|Medium|Light|Thin|Black|ExtraBold|SemiBold|DemiBold|ExtraLight|Heavy)$/i, '').trim(); if (short && short.toLowerCase() !== name.toLowerCase()) { list.push(short); const shortCompact = short.replace(/\s+/g, ''); if (shortCompact && shortCompact.toLowerCase() !== short.toLowerCase()) list.push(shortCompact); } return list; }; const seen = new Set(); const families = raw.split(',').map(clean).filter(Boolean).flatMap(aliases).filter(name => !seen.has(name.toLowerCase()) && seen.add(name.toLowerCase())); const css = families.map(name => generic.test(name) ? name : '""' + name + '""').join(', '); return css ? css + ', ' + fallback : fallback; }
+    function mediaUrl(file) { return '/donconnect/media/' + String(file || '').split('/').map(encodeURIComponent).join('/'); }
     function escapeHtml(value) { return String(value || '').replace(/[&<>'\x22]/g, ch => { const c = ch.charCodeAt(0); if (c === 38) return '&amp;'; if (c === 60) return '&lt;'; if (c === 62) return '&gt;'; if (c === 39) return '&#39;'; return '&quot;'; }); }
   </script>
 </body>

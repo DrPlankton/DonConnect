@@ -1,25 +1,25 @@
-# DonConnect Beta 2
+# DonConnect Beta 3
 
 ## Описание на русском
 
 DonConnect - расширение для Streamer.bot, которое принимает донаты с разных площадок и приводит их к одному формату для Streamer.bot, OBS-виджетов, цели, таймера, титров и лидерборда.
 
-Beta 2 добавляет встроенный браузерный редактор виджетов, OBS-док с последними донатами, донат-алерты, цель, таймер, титры, лидерборд, медиатеку, фильтр запретных слов и проверку новых версий. Пользователю не нужно устанавливать Node.js, npm, Python, Docker, Electron или отдельный сервер: редактор запускается самим расширением локально на `127.0.0.1`.
+Beta 3 включает встроенный браузерный редактор виджетов, OBS-док с последними донатами, донат-алерты, цель, таймер, титры, лидерборд, медиатеку, фильтр запретных слов и проверку новых версий. Пользователю не нужно устанавливать Node.js, npm, Python, Docker, Electron или отдельный сервер: редактор запускается самим расширением локально на `127.0.0.1`.
 
 - Русская инструкция: [README_RU.md](README_RU.md)
-- Патчноут Beta 2: [PATCH_NOTES_RU.md](PATCH_NOTES_RU.md)
-- Файл для установки: [DonConnect.Beta2.sb](DonConnect.Beta2.sb)
+- Патчноут Beta 3: [PATCH_NOTES_RU.md](PATCH_NOTES_RU.md)
+- Файл для установки: [DonConnect.Beta3.sb](DonConnect.Beta3.sb)
 
 ## Быстрый запуск для тестеров
 
-1. Скачайте `DonConnect.Beta2.sb`.
+1. Скачайте `DonConnect.Beta3.sb`.
 2. В Streamer.bot нажмите **Import**.
 3. Перетащите файл в окно импорта или вставьте его содержимое в **Import String**.
 4. После импорта откройте **DonConnect Widgets** -> `DonConnect - Widget Editor`.
 5. Нажмите правой кнопкой по **Command Trigger** и выберите **Test Trigger**.
 6. Редактор откроется в браузере, а ссылки для OBS можно скопировать прямо внутри редактора.
 
-Можно ставить поверх прошлой версии, но для чистого теста лучше удалить старые группы/actions DonConnect и импортировать Beta 2 заново. Горячую клавишу можно назначить вручную на action `DonConnect - Widget Editor`, например `Ctrl+Alt+D`.
+Можно ставить поверх прошлой версии, но для чистого теста лучше удалить старые группы/actions DonConnect и импортировать Beta 3 заново. Горячую клавишу можно назначить вручную на action `DonConnect - Widget Editor`, например `Ctrl+Alt+D`.
 
 ---
 
@@ -29,17 +29,17 @@ DonConnect is a Streamer.bot extension for receiving donations from several serv
 
 ### DonationAlerts And Other Providers
 
-1. Import `DonConnect.Beta2.sb` into Streamer.bot.
+1. Import `DonConnect.Beta3.sb` into Streamer.bot.
 2. Find the action `DonConnect - Подключение площадок`.
 3. Right-click its **Command Trigger** and choose **Test Trigger**.
 4. The unified provider connection page will open in your browser.
-5. Use the authorization button for DonationAlerts.
+5. For DonationAlerts, click **Создать приложение**, set the Redirect URL to http://127.0.0.1:8597/donconnect/donationalerts/callback/, paste your Client ID and Client Secret into DonConnect, then authorize.
 6. Paste tokens or API keys for other providers and click **Сохранить подключения**.
 7. Return to Streamer.bot and run `DonConnect - Widget Editor`.
 
 Provider rows are collapsible. Each header shows the current connection status, while diagnostic errors are displayed inside the row. The widget editor also has a **Connect providers** shortcut back to this page.
 
-You do not need to create your own DonationAlerts API application for this beta. The shared test application credentials are bundled so testers can connect faster.
+Beta 3 no longer bundles shared DonationAlerts application credentials. Each user creates their own DonationAlerts app, and the keys stay only in local DonConnect settings.
 
 Useful links:
 
@@ -68,13 +68,13 @@ Do not paste tokens into stream chat, Discord screenshots, public GitHub issues,
 Use one file:
 
 ```text
-DonConnect.Beta2.sb
+DonConnect.Beta3.sb
 ```
 
 In Streamer.bot:
 
 1. Open **Import**.
-2. Drop `DonConnect.Beta2.sb` into the import window, or open it as text and copy its full content.
+2. Drop `DonConnect.Beta3.sb` into the import window, or open it as text and copy its full content.
 3. If you copied the file content, paste it into **Import String**.
 4. Press **Import**.
 
@@ -120,7 +120,7 @@ Leaderboard:     1280 x 720
 OBS dock panel:  OBS custom browser dock
 ```
 
-## What Is Included In Beta 2
+## What Is Included In Beta 3
 
 - Built-in browser editor served from the Streamer.bot extension itself.
 - Direct editing for alert, goal, and timer elements: move, eight-handle resize, rotation, per-element reset, optional grid, and center guides without snapping.

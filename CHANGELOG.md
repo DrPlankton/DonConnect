@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.13.0-beta.3.14 - DonConnect Beta 3 Hotfix 14
+
+- Timer decorative images are now separated from goal decorative images, so timer reset/upload no longer affects goal artwork.
+- Fixed timer decor layer bindings in the direct preview editor, including move, resize, rotate, and reset.
+- Repacked `DonConnect.Beta3.sb` so the Streamer.bot import contains hotfix 14 code.
+
+## 0.13.0-beta.3.13 - DonConnect Beta 3 Hotfix 13
+
+- Donation logs now use the compact daily line format: `dd/mm/yy - donor - amount currency - platform - message`.
+- Moved the OBS Dock log-folder button next to Refresh and renamed it to Open logs.
+- Moved the OBS Dock editor tab to the end of the editor navigation.
+- Fixed goal preview resizing for the goal bar and goal text layers, including multi-selection reset behavior.
+- Fixed timer preview layer selection for providers and hidden timer layers; timer-only mode no longer shows the last donation line.
+- Added decorative image controls for donation alerts, timer, and leaderboard.
+
+## 0.13.0-beta.3.12 - DonConnect Beta 3 Hotfix 12
+
+- Fixed direct preview resizing for layered widgets: resizing one alert/goal/timer element now preserves the visual positions of the other editable layers.
+- Stabilized donation alert layout slots so increasing donor, amount, platform, message, or media size no longer pushes neighboring alert elements.
+
+## 0.13.0-beta.3.11 - DonConnect Beta 3 Hotfix 11
+
+- Unified daily donation log paths: real donation logs and the editor/OBS Dock "open logs" button now use the same DonConnect data folder.
+- Added height resizing for the goal/timer panel background in the direct preview editor.
+- Rechecked direct preview editing, widget startup retries, profile export/import coverage, provider-secret exclusion, and embedded browser JavaScript before repacking Beta 3.
+
+## 0.13.0-beta.3.10 - DonConnect Beta 3 Hotfix 10
+
+- Hardened local widget server startup: DonConnect now retries startup and runs a watchdog after Streamer.bot starts, so OBS widgets should not require opening the editor to recover.
+- Automatic Credits/leaderboard session reset now also runs from DonConnect startup with retries while Streamer.bot HTTP Server is still becoming available.
+- Added a donation log folder button to the OBS dock.
+- Renamed the editor OBS Dock log button to make daily donation logs easier to find.
+
+## 0.13.0-beta.3.9 - DonConnect Beta 3 Hotfix 9
+
+- Renamed the stream-start reset action to `DonConnect - Stream Start Reset`; it now resets Credits and leaderboard only once per local day.
+- A repeated `Stream Online` event on the same day, such as after a short outage or quick stream restart, no longer clears Credits and leaderboard again.
+- Manual Credits reset is now strict: if Streamer.bot HTTP Server does not answer `/ClearCredits`, DonConnect reports failure instead of treating the reset as successful.
+- Leaderboard auto-reset on startup is also protected from repeated same-day resets.
+
+## 0.13.0-beta.3.8 - DonConnect Beta 3 Hotfix 8
+
+- Added a small “Reset credits” button to the OBS dock. It clears DonConnect credits and calls Streamer.bot’s native Credits reset when its HTTP Server is available.
+- Added a `DonConnect - Reset Credits` action that can be assigned to `Twitch -> Channel -> Stream Online` for stream-start Credits resets.
+- Prevented stale Streamer.bot Credits file cache from immediately reappearing after a manual credits reset.
+- Rechecked Beta 3 critical paths: local server startup, media-preserving profiles, daily donation logs, provider secrets, timer, goal, and direct preview editing.
+
+## 0.13.0-beta.3 - DonConnect Beta 3
+
+- Added a separate goal deadline timer inside the goal widget. It is disabled by default, uses an end date/time, can be moved in preview, and has its own layer.
+- Made Streamer.bot Credits filtering safer: if a Streamer.bot settings schema is not recognized, DonConnect no longer treats missing section arrays as disabled sections.
+- Removed bundled DonationAlerts application credentials; users now connect through their own DonationAlerts app.
+- Improved startup resilience: the widget/editor server starts independently from provider startup failures.
+- Updated the DonationAlerts provider page with app-creation guidance, Redirect URL instructions, and Client ID/Secret validation before authorization.
+- Clarified widget profile export/import: used media files are included, provider tokens are not.
+- Confirmed provider status: Streamlabs, Donate.Stream, deStream, and the existing providers remain active; StreamEngine stays marked as in development.
+
+## 0.12.1-beta.2.8 - DonConnect Beta 2 Hotfix 8
+
+- Fixed Credits speed logic: the slider now behaves as speed, so moving it right makes Credits faster.
+- DonConnect Credits now resolves donor names from `name`, `donor`, `user`, and related aliases instead of falling back to `Viewer`.
+- Long Credits rolls auto-accelerate unless “Do not speed up long credits” is enabled.
+- Improved installed Windows/custom font fallback for family names with `Regular/Bold/Italic` suffixes.
+- Fixed grouped preview movement so nested selected elements no longer move at double speed.
+- Prevented alert/goal text and media from being clipped while resizing in the preview editor.
+- Made leaderboard slide transitions smoother.
+- Updated the import package with the Hotfix 8 code.
+
 ## 0.12.1-beta.2.7 - DonConnect Beta 2 Hotfix 7
 
 - Made the provider connection page compact and collapsible, with diagnostic connection status in each header.
@@ -16,7 +84,7 @@
 - Fixed decimal opacity persistence and added leaderboard text alignment.
 - Added independent X/Y controls for donor, amount, message, and platform in donation alerts.
 - Fixed manual fallback currency conversion and made timer tests use the production conversion path.
-- Added widget profile export/import without provider secrets or media library files.
+- Added widget profile export/import without provider secrets; used alert media files are included.
 - Added a browser-based provider connection page that never returns saved secrets to the browser.
 - Added direct drag and resize editing for supported preview elements.
 - Made recommended OBS Browser Source dimensions more prominent.
