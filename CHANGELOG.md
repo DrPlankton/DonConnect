@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.0-beta.3.15 - DonConnect Beta 3 Hotfix 15
+
+- The timer widget no longer shows the last-donor line; that block remains goal-only.
+- The default donation alert layout is centered more tightly so first-run elements do not appear shifted.
+- Cleared old provider values from setup actions (`Client ID`, `Client Secret`, JWT, API keys, access tokens, and custom endpoint), so the importable `.sb` no longer contains data from the test machine.
+- Added `BETA3_CLOUD_REFERENCE_RU.md` as a complete Beta 3 feature reference for the future DonConnect cloud version.
+
 ## 0.13.0-beta.3.14 - DonConnect Beta 3 Hotfix 14
 
 - Timer decorative images are now separated from goal decorative images, so timer reset/upload no longer affects goal artwork.
